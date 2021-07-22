@@ -20,6 +20,8 @@ import (
 	"github.com/ovrclk/akash/types/unit"
 	mquery "github.com/ovrclk/akash/x/market/query"
 	mtypes "github.com/ovrclk/akash/x/market/types"
+
+	sdktypes "github.com/cosmos/cosmos-sdk/types"
 )
 
 var (
@@ -36,6 +38,20 @@ var (
 
 	errNotImplemented = errors.New("not implemented")
 )
+
+type ProviderResourceEvent string
+const (
+	ProviderResourceAdd = ProviderResourceEvent("add")
+	ProviderResourceUpdate  = ProviderResourceEvent("update")
+	ProviderResourceDelete  = ProviderResourceEvent("delete")
+)
+
+type HostnameResourceEvent interface {
+	GetOwner() sdktypes.Address
+	GetDeploymentSequence() uint64
+	GetEventType() ProviderResourceEvent
+	GetHostname() string
+}
 
 type ReadClient interface {
 	LeaseStatus(context.Context, mtypes.LeaseID) (*ctypes.LeaseStatus, error)

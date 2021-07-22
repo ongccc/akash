@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	metricsutils "github.com/ovrclk/akash/util/metrics"
+	dtypes "github.com/ovrclk/akash/x/deployment/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	netv1 "k8s.io/api/networking/v1"
 	"os"
 	"path"
+	"strings"
 
 	"k8s.io/client-go/util/flowcontrol"
 
@@ -32,6 +35,7 @@ import (
 	"github.com/tendermint/tendermint/libs/log"
 
 	"github.com/ovrclk/akash/manifest"
+	akashtypes "github.com/ovrclk/akash/pkg/apis/akash.network/v1"
 	akashclient "github.com/ovrclk/akash/pkg/client/clientset/versioned"
 	"github.com/ovrclk/akash/provider/cluster"
 	"github.com/ovrclk/akash/types"
@@ -40,6 +44,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	restclient "k8s.io/client-go/rest"
+
+	sdktypes "github.com/cosmos/cosmos-sdk/types"
 )
 
 var (
@@ -140,6 +146,39 @@ func openKubeConfig(cfgPath string, log log.Logger) (*rest.Config, error) {
 	return rest.InClusterConfig()
 }
 
+func (c *client) GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.Deployment, error) {
+	labelSelectors := &strings.Builder{}
+	fmt.Fprintf(labelSelectors, "%s=%d", akashLeaseDSeqLabelName, dID.DSeq)
+	fmt.Fprintf(labelSelectors, ",%s=%s", akashLeaseOwnerLabelName, dID.Owner)
+
+	manifests, err := c.ac.AkashV1().Manifests(c.ns).List(ctx, metav1.ListOptions{
+		TypeMeta:             metav1.TypeMeta{},
+		LabelSelector:        labelSelectors.String(),
+		FieldSelector:        "",
+		Watch:                false,
+		AllowWatchBookmarks:  false,
+		ResourceVersion:      "",
+		ResourceVersionMatch: "",
+		TimeoutSeconds:       nil,
+		Limit:                0,
+		Continue:             "",
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]ctypes.Deployment, len(manifests.Items))
+	for i, manifest := range manifests.Items {
+		result[i], err = manifest.Deployment()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return result, nil
+}
+
 func (c *client) Deployments(ctx context.Context) ([]ctypes.Deployment, error) {
 	manifests, err := c.ac.AkashV1().Manifests(c.ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -213,16 +252,44 @@ func (c *client) Deploy(ctx context.Context, lid mtypes.LeaseID, group *manifest
 			}
 		}
 
-		for expIdx := range service.Expose {
-			expose := service.Expose[expIdx]
-			if !util.ShouldBeIngress(expose) {
-				continue
-			}
-			if err := applyIngress(ctx, c.kc, newIngressBuilder(c.log, c.settings, lid, group, service, &service.Expose[expIdx])); err != nil {
-				c.log.Error("applying ingress", "err", err, "lease", lid, "service", service.Name, "expose", expose)
-				return err
-			}
-		}
+	   for _, expose := range service.Expose {
+		   if !util.ShouldBeIngress(expose) {
+			   continue
+		   }
+
+		   for _, host := range expose.Hosts {
+			   _, err := c.ac.AkashV1().ProviderHosts(c.ns).Get(ctx, host, metav1.GetOptions{})
+			   exists := true
+			   if err != nil {
+				   if kubeErrors.IsNotFound(err) {
+					   exists = false
+				   } else {
+					   return err
+				   }
+			   }
+
+			   obj := akashtypes.ProviderHost{
+				   ObjectMeta: metav1.ObjectMeta{
+					   Name: host,
+				   },
+				   Spec:       akashtypes.ProviderHostSpec{
+					   Owner:       lid.GetOwner(),
+					   Hostname:    host,
+					   Dseq:        lid.GetDSeq(),
+				   },
+				   Status:     akashtypes.ProviderHostStatus{},
+			   }
+
+			   if exists {
+					_, err = c.ac.AkashV1().ProviderHosts(c.ns).Update(ctx, &obj, metav1.UpdateOptions{})
+			   } else {
+					_, err = c.ac.AkashV1().ProviderHosts(c.ns).Create(ctx, &obj, metav1.CreateOptions{})
+			   }
+			   if err != nil {
+			   		return err
+			   }
+		   }
+	   }
 	}
 
 	return nil
@@ -876,4 +943,191 @@ func (c *client) deploymentsForLease(ctx context.Context, lid mtypes.LeaseID) ([
 	}
 
 	return deployments.Items, nil
+}
+
+type hostnameResourceEvent struct {
+	eventType cluster.ProviderResourceEvent
+	hostname string
+	dseq uint64
+	owner sdktypes.Address
+}
+
+func (ev hostnameResourceEvent) GetOwner() sdktypes.Address {
+	return ev.owner
+}
+
+func (ev hostnameResourceEvent) GetHostname() string {
+	return ev.hostname
+}
+
+func (ev hostnameResourceEvent) GetDeploymentSequence() uint64 {
+	return ev.dseq
+}
+
+func (ev hostnameResourceEvent) GetEventType() cluster.ProviderResourceEvent {
+	return ev.eventType
+}
+
+func (c *client) ObserveHostnameState(ctx context.Context) (<- chan cluster.HostnameResourceEvent, error) {
+	var lastResourceVersion string
+	phpager := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
+		resources, err := c.ac.AkashV1().ProviderHosts(c.ns).List(ctx, opts)
+
+		if err == nil && len(resources.GetResourceVersion()) != 0 {
+			lastResourceVersion = resources.GetResourceVersion()
+		}
+		return resources, err
+	})
+
+	data := make([]akashtypes.ProviderHost, 0, 128)
+	err := phpager.EachListItem(ctx, metav1.ListOptions{}, func(obj runtime.Object) error {
+		ph := obj.(*akashtypes.ProviderHost)
+		data = append(data, *ph)
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("Starting watch @ %q\n", lastResourceVersion)
+	watcher, err := c.ac.AkashV1().ProviderHosts(c.ns).Watch(ctx, metav1.ListOptions{
+		TypeMeta:             metav1.TypeMeta{},
+		LabelSelector:        "",
+		FieldSelector:        "",
+		Watch:                false,
+		AllowWatchBookmarks:  false,
+		ResourceVersion:      lastResourceVersion,
+		ResourceVersionMatch: "",
+		TimeoutSeconds:       nil,
+		Limit:                0,
+		Continue:             "",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	evData := make([]hostnameResourceEvent, len(data))
+	for i, v := range data {
+		ownerAddr, err := sdktypes.AccAddressFromBech32(v.Spec.Owner)
+		if err != nil {
+			return nil, err
+		}
+		ev := hostnameResourceEvent{
+			eventType: cluster.ProviderResourceAdd,
+			hostname:  v.Spec.Hostname,
+			dseq:      v.Spec.Dseq,
+			owner:     ownerAddr,
+		}
+		evData[i] = ev
+	}
+
+	data = nil
+
+	output := make(chan cluster.HostnameResourceEvent)
+
+	go func () {
+		defer close(output)
+		for _, v := range evData {
+			output <- v
+		}
+		evData = nil // do not hold the reference
+		
+		results := watcher.ResultChan()
+		for {
+			select {
+			case result, ok := <-results:
+				if !ok { // Channel closed when an error happens
+					return
+				}
+				ph := result.Object.(*akashtypes.ProviderHost)
+				ownerAddr, err := sdktypes.AccAddressFromBech32(ph.Spec.Owner)
+				if err != nil {
+					// ?
+					panic(err)
+				}
+				ev := hostnameResourceEvent{
+					hostname:  ph.Spec.Hostname,
+					dseq:      ph.Spec.Dseq,
+					owner:     ownerAddr,
+				}
+				switch result.Type {
+
+				case watch.Added:
+					ev.eventType = cluster.ProviderResourceAdd
+				case watch.Modified:
+				case watch.Deleted:
+
+				default:
+					continue
+				}
+
+				output <- ev
+
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return output, nil
+}
+
+func (c *client) ConnectHostnameToDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error {
+	ingressName := hostname
+	ns := lidNS(leaseID)
+	rules := ingressRules(hostname, serviceName, servicePort)
+
+	_, err := c.kc.NetworkingV1().Ingresses(ns).Get(ctx, ingressName, metav1.GetOptions{})
+	metricsutils.IncCounterVecWithLabelValuesFiltered(kubeCallsCounter, "ingresses-get", err, kubeErrors.IsNotFound)
+
+	obj := &netv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   ingressName,
+			Labels: nil, // TODO
+		},
+		Spec: netv1.IngressSpec{
+			Rules: rules,
+		},
+	}
+
+	switch {
+	case err == nil:
+		_, err = c.kc.NetworkingV1().Ingresses(ns).Update(ctx, obj, metav1.UpdateOptions{})
+		metricsutils.IncCounterVecWithLabelValues(kubeCallsCounter, "networking-ingresses-update", err)
+	case kubeErrors.IsNotFound(err):
+		_, err = c.kc.NetworkingV1().Ingresses(ns).Create(ctx, obj, metav1.CreateOptions{})
+		metricsutils.IncCounterVecWithLabelValues(kubeCallsCounter, "networking-ingresses-create", err)
+	}
+
+	return err
+}
+
+func (c *client) RemoveHostnameFromDeployment(hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error {
+	return nil
+}
+
+func ingressRules(hostname string, kubeServiceName string, kubeServicePort int32) []netv1.IngressRule{
+	// for some reason we need to pass a pointer to this
+	pathTypeForAll := netv1.PathTypePrefix
+	ruleValue := netv1.HTTPIngressRuleValue{
+		Paths: []netv1.HTTPIngressPath{{
+			Path:     "/",
+			PathType: &pathTypeForAll,
+			Backend:  netv1.IngressBackend{
+				Service:  &netv1.IngressServiceBackend{
+					Name: kubeServiceName,
+					Port: netv1.ServiceBackendPort{
+						Number: kubeServicePort,
+					},
+				},
+			},
+		},},
+	}
+
+	return []netv1.IngressRule{{
+		Host:             hostname,
+		IngressRuleValue: netv1.IngressRuleValue{HTTP: &ruleValue},
+	},}
+
 }

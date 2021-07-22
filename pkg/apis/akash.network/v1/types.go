@@ -344,3 +344,33 @@ type ManifestList struct {
 	metav1.ListMeta `json:",inline"`
 	Items           []Manifest `json:"items"`
 }
+
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type ProviderHost struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata"`
+
+	Spec   ProviderHostSpec   `json:"spec,omitempty"`
+	Status ProviderHostStatus `json:"status,omitempty"`
+}
+
+type ProviderHostStatus struct {
+	State   string `json:"state,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+type ProviderHostSpec struct {
+	Owner string `json:"owner"`
+	Hostname string `json:"hostname"`
+	Dseq uint64 `json:"dseq"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type ProviderHostList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata"`
+	Items           []ProviderHost `json:"items"`
+}

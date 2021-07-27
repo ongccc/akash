@@ -17,6 +17,7 @@ type dummy interface {
 	ObserveHostnameState(ctx context.Context) (<- chan cluster.HostnameResourceEvent, error)
 	GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.Deployment, error)
 	ConnectHostnameToDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error
+	GetHostnameDeploymentConnections(ctx context.Context) ([]cluster.LeaseIdAndHostname, error)
 }
 
 type managedHostname struct {
@@ -36,6 +37,18 @@ func (op *hostnameOperator) run(parentCtx context.Context) error {
 	// TODO - list through all ingresses labels by Akash provider
 	// and then use that data to populate op.hostnames
 	ctx, cancel := context.WithCancel(parentCtx)
+
+	connections, err := op.client.(dummy).GetHostnameDeploymentConnections(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, conn := range connections {
+		leaseID := conn.GetLeaseID()
+		hostname := conn.GetHostname()
+	}
+
+
 	events, err := op.client.(dummy).ObserveHostnameState(ctx)
 	if err != nil {
 		cancel()

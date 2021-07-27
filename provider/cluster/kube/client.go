@@ -10,6 +10,7 @@ import (
 	netv1 "k8s.io/api/networking/v1"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 
 	"k8s.io/client-go/util/flowcontrol"
@@ -1081,10 +1082,13 @@ func (c *client) ConnectHostnameToDeployment(ctx context.Context, hostname strin
 	_, err := c.kc.NetworkingV1().Ingresses(ns).Get(ctx, ingressName, metav1.GetOptions{})
 	metricsutils.IncCounterVecWithLabelValuesFiltered(kubeCallsCounter, "ingresses-get", err, kubeErrors.IsNotFound)
 
+	labels := make(map[string]string)
+	appendLeaseLabels(leaseID, labels)
+
 	obj := &netv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   ingressName,
-			Labels: nil, // TODO
+			Labels: labels,
 		},
 		Spec: netv1.IngressSpec{
 			Rules: rules,
@@ -1104,7 +1108,93 @@ func (c *client) ConnectHostnameToDeployment(ctx context.Context, hostname strin
 }
 
 func (c *client) RemoveHostnameFromDeployment(hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error {
+	// TODO - lol
 	return nil
+}
+
+var anError = errors.New("boom")
+
+type leaseIdAndHostname struct {
+	leaseID mtypes.LeaseID
+	hostname string
+}
+
+func (lh leaseIdAndHostname) GetHostname() string {
+	return lh.hostname
+}
+
+func (lh leaseIdAndHostname) GetLeaseID() mtypes.LeaseID {
+	return lh.leaseID
+}
+
+func (c *client) GetHostnameDeploymentConnections(ctx context.Context) ([]cluster.LeaseIdAndHostname, error) {
+	ingressPager := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
+		return c.kc.NetworkingV1().Ingresses(metav1.NamespaceAll).List(ctx, opts)
+	})
+
+	results := make([]cluster.LeaseIdAndHostname, 0)
+	err := ingressPager.EachListItem(ctx, metav1.ListOptions{ /*TODO - filter to labeled */}, func(obj runtime.Object) error {
+		ingress := obj.(*netv1.Ingress)
+		dseqS, ok := ingress.Labels[akashLeaseDSeqLabelName]
+		if !ok {
+			return anError
+		}
+		gseqS, ok := ingress.Labels[akashLeaseGSeqLabelName]
+		if !ok {
+			return anError
+		}
+		oseqS, ok := ingress.Labels[akashLeaseOSeqLabelName]
+		if !ok {
+			return anError
+		}
+		owner, ok := ingress.Labels[akashLeaseOwnerLabelName]
+		if !ok {
+			return anError
+		}
+
+		provider, ok := ingress.Labels[akashLeaseProviderLabelName]
+		if !ok {
+			return anError
+		}
+
+		dseq, err := strconv.ParseUint(dseqS,10, 64)
+		if err != nil {
+			return err
+		}
+
+		gseq, err := strconv.ParseUint(gseqS, 10, 32)
+		if err != nil {
+			return err
+		}
+
+		oseq, err := strconv.ParseUint(oseqS, 10, 32)
+		if err != nil {
+			return err
+		}
+
+		ingressLeaseID := mtypes.LeaseID{
+			Owner:    owner,
+			DSeq:     dseq,
+			GSeq:     uint32(gseq),
+			OSeq:     uint32(oseq),
+			Provider: provider,
+		}
+
+		for _, rule := range ingress.Spec.Rules {
+			results = append(results, leaseIdAndHostname{
+				leaseID:  ingressLeaseID,
+				hostname: rule.Host,
+			})
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return results, nil
 }
 
 func ingressRules(hostname string, kubeServiceName string, kubeServicePort int32) []netv1.IngressRule{

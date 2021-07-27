@@ -341,7 +341,7 @@ func resourceUnitsFromAkash(aru types.ResourceUnits) (ResourceUnits, error) {
 // ManifestList stores metadata and items list of manifest
 type ManifestList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata"`
 	Items           []Manifest `json:"items"`
 }
 

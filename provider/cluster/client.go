@@ -79,9 +79,11 @@ type Client interface {
 		tsq remotecommand.TerminalSizeQueue) (ctypes.ExecResult, error)
 }
 
-type LeaseIdAndHostname interface {
+type LeaseIdHostnameConnection interface {
 	GetLeaseID() mtypes.LeaseID
 	GetHostname() string
+    GetExternalPort() int32
+	GetServiceName() string
 }
 
 func ErrorIsOkToSendToClient(err error) bool {

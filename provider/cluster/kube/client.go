@@ -225,6 +225,9 @@ func (c *client) Deploy(ctx context.Context, lid mtypes.LeaseID, group *manifest
 		return err
 	}
 
+	labels := make(map[string]string)
+	appendLeaseLabels(lid, labels)
+
 	for svcIdx := range group.Services {
 		service := &group.Services[svcIdx]
 		if err := applyDeployment(ctx, c.kc, newDeploymentBuilder(c.log, c.settings, lid, group, service)); err != nil {
@@ -252,58 +255,95 @@ func (c *client) Deploy(ctx context.Context, lid mtypes.LeaseID, group *manifest
 				return err
 			}
 		}
-
-	   for _, expose := range service.Expose {
-		   if !util.ShouldBeIngress(expose) {
-			   continue
-		   }
-
-		   for _, host := range expose.Hosts {
-			   _, err := c.ac.AkashV1().ProviderHosts(c.ns).Get(ctx, host, metav1.GetOptions{})
-			   exists := true
-			   if err != nil {
-				   if kubeErrors.IsNotFound(err) {
-					   exists = false
-				   } else {
-					   return err
-				   }
-			   }
-
-			   obj := akashtypes.ProviderHost{
-				   ObjectMeta: metav1.ObjectMeta{
-					   Name: host,
-				   },
-				   Spec:       akashtypes.ProviderHostSpec{
-					   Owner:       lid.GetOwner(),
-					   Hostname:    host,
-					   Dseq:        lid.GetDSeq(),
-				   },
-				   Status:     akashtypes.ProviderHostStatus{},
-			   }
-
-			   if exists {
-					_, err = c.ac.AkashV1().ProviderHosts(c.ns).Update(ctx, &obj, metav1.UpdateOptions{})
-			   } else {
-					_, err = c.ac.AkashV1().ProviderHosts(c.ns).Create(ctx, &obj, metav1.CreateOptions{})
-			   }
-			   if err != nil {
-			   		return err
-			   }
-		   }
-	   }
 	}
 
 	return nil
 }
 
 func (c *client) TeardownLease(ctx context.Context, lid mtypes.LeaseID) error {
-	result := c.kc.CoreV1().Namespaces().Delete(ctx, lidNS(lid), metav1.DeleteOptions{})
+	leaseNamespace := lidNS(lid)
+	result := c.kc.CoreV1().Namespaces().Delete(ctx, leaseNamespace, metav1.DeleteOptions{})
 
 	label := metricsutils.SuccessLabel
 	if result != nil {
 		label = metricsutils.FailLabel
 	}
 	kubeCallsCounter.WithLabelValues("namespaces-delete", label).Inc()
+
+	return result
+}
+
+// TODO - add list of prohibited hostnames
+func (c *client) DeclareHostnames(ctx context.Context, lID mtypes.LeaseID, group *manifest.Group) error {
+	labels := make(map[string]string)
+	appendLeaseLabels(lID, labels)
+
+	for _, service := range group.Services {
+		for _, expose := range service.Expose {
+			if !util.ShouldBeIngress(expose) {
+				continue
+			}
+
+			var hosts []string
+
+			if c.settings.DeploymentIngressStaticHosts {
+				uid := ingressHost(lID, &service)
+				host := fmt.Sprintf("%s.%s", uid, c.settings.DeploymentIngressDomain)
+				hosts = append(hosts, host)
+			}
+
+			for _, host := range expose.Hosts {
+				hosts = append(hosts, host)
+			}
+			for _, host := range hosts {
+				_, err := c.ac.AkashV1().ProviderHosts(c.ns).Get(ctx, host, metav1.GetOptions{})
+				exists := true
+				if err != nil {
+					if kubeErrors.IsNotFound(err) {
+						exists = false
+					} else {
+						return err
+					}
+				}
+
+				obj := akashtypes.ProviderHost{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: host,
+						Labels: labels,
+					},
+					Spec:       akashtypes.ProviderHostSpec{
+						Owner:       lID.GetOwner(),
+						Hostname:    host,
+						Dseq:        lID.GetDSeq(),
+					},
+					Status:     akashtypes.ProviderHostStatus{},
+
+				}
+
+				if exists {
+					_, err = c.ac.AkashV1().ProviderHosts(c.ns).Update(ctx, &obj, metav1.UpdateOptions{})
+				} else {
+					_, err = c.ac.AkashV1().ProviderHosts(c.ns).Create(ctx, &obj, metav1.CreateOptions{})
+				}
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *client) PurgeDeclaredHostnames(ctx context.Context, lID mtypes.LeaseID) error {
+	labelSelector := &strings.Builder{}
+	fmt.Fprintf(labelSelector, "%s=%s", akashLeaseOwnerLabelName, lID.Owner)
+	fmt.Fprintf(labelSelector, ",%s=%d", akashLeaseDSeqLabelName, lID.DSeq)
+	fmt.Fprintf(labelSelector, ",%s=%d", akashLeaseGSeqLabelName, lID.GSeq)
+	fmt.Fprintf(labelSelector, ",%s=%d", akashLeaseOSeqLabelName, lID.OSeq)
+	result := c.ac.AkashV1().ProviderHosts(c.ns).DeleteCollection(ctx, metav1.DeleteOptions{}, metav1.ListOptions{
+		LabelSelector:       labelSelector.String(),
+	})
 
 	return result
 }
@@ -1108,31 +1148,41 @@ func (c *client) ConnectHostnameToDeployment(ctx context.Context, hostname strin
 }
 
 func (c *client) RemoveHostnameFromDeployment(hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error {
-	// TODO - lol
+	// TODO
 	return nil
 }
 
 var anError = errors.New("boom")
 
-type leaseIdAndHostname struct {
+type leaseIdHostnameConnection struct {
 	leaseID mtypes.LeaseID
 	hostname string
+	externalPort int32
+	serviceName string
 }
 
-func (lh leaseIdAndHostname) GetHostname() string {
+func (lh leaseIdHostnameConnection) GetHostname() string {
 	return lh.hostname
 }
 
-func (lh leaseIdAndHostname) GetLeaseID() mtypes.LeaseID {
+func (lh leaseIdHostnameConnection) GetLeaseID() mtypes.LeaseID {
 	return lh.leaseID
 }
 
-func (c *client) GetHostnameDeploymentConnections(ctx context.Context) ([]cluster.LeaseIdAndHostname, error) {
+func (lh leaseIdHostnameConnection) GetExternalPort() int32 {
+	return lh.externalPort
+}
+
+func (lh leaseIdHostnameConnection) GetServiceName() string {
+	return lh.serviceName
+}
+
+func (c *client) GetHostnameDeploymentConnections(ctx context.Context) ([]cluster.LeaseIdHostnameConnection, error) {
 	ingressPager := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
 		return c.kc.NetworkingV1().Ingresses(metav1.NamespaceAll).List(ctx, opts)
 	})
 
-	results := make([]cluster.LeaseIdAndHostname, 0)
+	results := make([]cluster.LeaseIdHostnameConnection, 0)
 	err := ingressPager.EachListItem(ctx, metav1.ListOptions{ /*TODO - filter to labeled */}, func(obj runtime.Object) error {
 		ingress := obj.(*netv1.Ingress)
 		dseqS, ok := ingress.Labels[akashLeaseDSeqLabelName]
@@ -1180,12 +1230,21 @@ func (c *client) GetHostnameDeploymentConnections(ctx context.Context) ([]cluste
 			Provider: provider,
 		}
 
-		for _, rule := range ingress.Spec.Rules {
-			results = append(results, leaseIdAndHostname{
-				leaseID:  ingressLeaseID,
-				hostname: rule.Host,
-			})
+		if len(ingress.Spec.Rules) != 1 {
+			// TODO - ???
 		}
+		rule := ingress.Spec.Rules[0]
+
+		if len(rule.IngressRuleValue.HTTP.Paths) != 1 {
+			// TODO - ???
+		}
+		rulePath := rule.IngressRuleValue.HTTP.Paths[0]
+		results = append(results, leaseIdHostnameConnection{
+			leaseID:      ingressLeaseID,
+			hostname:     rule.Host,
+			externalPort: rulePath.Backend.Service.Port.Number,
+			serviceName:  rulePath.Backend.Service.Name,
+		})
 
 		return nil
 	})

@@ -3,15 +3,12 @@ package kube
 // nolint:deadcode,golint
 
 import (
-	"encoding/base32"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/ovrclk/akash/provider/cluster/util"
-	uuid "github.com/satori/go.uuid"
-
 	"github.com/tendermint/tendermint/libs/log"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -939,8 +936,7 @@ func newIngressBuilder(log log.Logger, settings Settings, lid mtypes.LeaseID, gr
 }
 
 func ingressHost(lid mtypes.LeaseID, svc *manifest.Service) string {
-	uid := uuid.NewV5(uuid.NamespaceDNS, lid.String()+svc.Name).Bytes()
-	return strings.ToLower(base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(uid))
+	return util.IngressHost(lid, svc.Name)
 }
 
 func (b *ingressBuilder) create() (*netv1.Ingress, error) { // nolint:golint,unparam

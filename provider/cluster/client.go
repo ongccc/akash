@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	akashv1 "github.com/ovrclk/akash/pkg/apis/akash.network/v1"
 	"io"
 	"k8s.io/client-go/tools/remotecommand"
 	"math/rand"
@@ -33,8 +34,8 @@ var (
 	ErrExecDeploymentNotYetRunning = fmt.Errorf("%w: deployment is not yet active", ErrExec)
 	ErrExecMultiplePods            = fmt.Errorf("%w: cannot execute without specifying a pod explicitly", ErrExec)
 	ErrExecPodIndexOutOfRange      = fmt.Errorf("%w: pod index out of range", ErrExec)
-
 	errNotImplemented = errors.New("not implemented")
+	ErrClearHostnameNoMatches        = errors.New("clearing hostname, no matches")
 )
 
 type ReadClient interface {
@@ -42,12 +43,15 @@ type ReadClient interface {
 	LeaseEvents(context.Context, mtypes.LeaseID, string, bool) (ctypes.EventsWatcher, error)
 	LeaseLogs(context.Context, mtypes.LeaseID, string, bool, *int64) ([]*ctypes.ServiceLog, error)
 	ServiceStatus(context.Context, mtypes.LeaseID, string) (*ctypes.ServiceStatus, error)
+	LeaseHostnames(context.Context, mtypes.LeaseID) ([]string, error)
+	AllHostnames(context.Context) ([]ActiveHostname, error)
+	GetManifestGroup(context.Context, mtypes.LeaseID) (bool, akashv1.ManifestGroup, error)
 }
 
 // Client interface lease and deployment methods
 type Client interface {
 	ReadClient
-	Deploy(context.Context, mtypes.LeaseID, *manifest.Group) error
+	Deploy(ctx context.Context, lID mtypes.LeaseID, mgroup *manifest.Group, holdHostnames []string) error
 	TeardownLease(context.Context, mtypes.LeaseID) error
 	Deployments(context.Context) ([]ctypes.Deployment, error)
 	Inventory(context.Context) ([]ctypes.Node, error)
@@ -65,6 +69,11 @@ type Client interface {
 
 func ErrorIsOkToSendToClient(err error) bool {
 	return errors.Is(err, ErrExec)
+}
+
+type ActiveHostname struct {
+	ID mtypes.LeaseID
+	Hostnames []string
 }
 
 type node struct {
@@ -131,7 +140,7 @@ func NullClient() Client {
 	}
 }
 
-func (c *nullClient) Deploy(ctx context.Context, lid mtypes.LeaseID, mgroup *manifest.Group) error {
+func (c *nullClient) Deploy(ctx context.Context, lid mtypes.LeaseID, mgroup *manifest.Group, holdHostnames []string) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
@@ -282,3 +291,16 @@ func (c *nullClient) Inventory(context.Context) ([]ctypes.Node, error) {
 func (c *nullClient) Exec(context.Context, mtypes.LeaseID, string, uint, []string, io.Reader, io.Writer, io.Writer, bool, remotecommand.TerminalSizeQueue) (ctypes.ExecResult, error) {
 	return nil, errNotImplemented
 }
+
+func (c *nullClient) LeaseHostnames(context.Context, mtypes.LeaseID) ([]string, error) {
+	return nil, nil
+}
+
+func (c *nullClient) GetManifestGroup(context.Context, mtypes.LeaseID) (bool, akashv1.ManifestGroup, error) {
+	return false, akashv1.ManifestGroup{}, nil
+}
+
+func (c *nullClient) AllHostnames(context.Context) ([]ActiveHostname, error) {
+	return nil, nil
+}
+

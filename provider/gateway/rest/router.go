@@ -90,6 +90,11 @@ func newRouter(log log.Logger, addr sdk.Address, pclient provider.Client) *mux.R
 		validateHandler(log, pclient)).
 		Methods("GET")
 
+	hostnameRouter := router.PathPrefix(hostnamePrefix).Subrouter()
+	hostnameRouter.Use(requireOwner())
+	hostnameRouter.HandleFunc("/migrate", migrateHandler(log, pclient.Hostname(), pclient.ClusterService())).
+		Methods(http.MethodPost)
+
 	// PUT /deployment/manifest
 	drouter := router.PathPrefix(deploymentPathPrefix).Subrouter()
 	drouter.Use(
@@ -99,7 +104,7 @@ func newRouter(log log.Logger, addr sdk.Address, pclient provider.Client) *mux.R
 
 	drouter.HandleFunc("/manifest",
 		createManifestHandler(log, pclient.Manifest())).
-		Methods("PUT")
+		Methods(http.MethodPut)
 
 	lrouter := router.PathPrefix(leasePathPrefix).Subrouter()
 	lrouter.Use(
@@ -110,7 +115,7 @@ func newRouter(log log.Logger, addr sdk.Address, pclient provider.Client) *mux.R
 	// GET /lease/<lease-id>/status
 	lrouter.HandleFunc("/status",
 		leaseStatusHandler(log, pclient.Cluster())).
-		Methods("GET")
+		Methods(http.MethodGet)
 
 	// GET /lease/<lease-id>/kubeevents
 	eventsRouter := lrouter.PathPrefix("/kubeevents").Subrouter()
@@ -147,6 +152,7 @@ func newRouter(log log.Logger, addr sdk.Address, pclient provider.Client) *mux.R
 
 	return router
 }
+
 
 type channelToTerminalSizeQueue <-chan remotecommand.TerminalSize
 
@@ -335,6 +341,115 @@ func leaseShellHandler(log log.Logger, mclient pmanifest.Client, cclient cluster
 		}
 
 	}
+}
+
+type migrateRequestBody struct {
+	HostnamesToMigrate []string `json:"hostnames_to_migrate"`
+	DestinationDSeq uint64 `json:"destination_dseq"`
+}
+
+func migrateHandler(log log.Logger, hostnameService cluster.HostnameServiceClient, clusterService cluster.Service) http.HandlerFunc{
+	return func (rw http.ResponseWriter, req *http.Request) {
+		body := migrateRequestBody{}
+		dec := json.NewDecoder(req.Body)
+		err := dec.Decode(&body)
+		defer func() {
+			_ = req.Body.Close()
+		}()
+
+		if err != nil {
+			log.Error("could not read request body as json", "err", err)
+			rw.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
+
+		if len(body.HostnamesToMigrate) == 0 {
+			log.Error("no hostnames indicated for migration")
+			rw.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+
+
+		owner := requestOwner(req)
+
+		// Make sure this hostname can be taken
+		dID := dtypes.DeploymentID{
+			Owner: owner.String(),
+			DSeq:  body.DestinationDSeq,
+		}
+
+		//  make sure destination deployment actually exists
+		activeLeases, err := clusterService.FindActiveLeases(req.Context(), dID)
+		if err != nil {
+			log.Error("failed checking if destination deployment exists", "err", err)
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		if len(activeLeases) == 0 {
+			log.Info("destination deployment does not exist", "dseq", body.DestinationDSeq)
+			http.Error(rw, "destination deployment does not exist", http.StatusBadRequest)
+			return
+		}
+
+		// check that the destination leases can actually use the requested hostnames
+		hostnamesInManifestGroups := make(map[string]struct{})
+		for _, activeLease := range activeLeases {
+			for _, service := range activeLease.Group.Services {
+				for _, expose := range service.Expose {
+					for _, host := range expose.Hosts {
+						hostnamesInManifestGroups[host] = struct{}{}
+					}
+				}
+			}
+		}
+
+		for _, hostname := range body.HostnamesToMigrate {
+			_, inUse := hostnamesInManifestGroups[hostname]
+			if !inUse {
+				msg := fmt.Sprintf("the hostname %q is not used by this deployment", hostname)
+				http.Error(rw, msg, http.StatusBadRequest)
+				return
+			}
+
+		}
+
+		log.Debug("preparing migration of hostnames", "cnt", len(body.HostnamesToMigrate))
+		errCh := hostnameService.PrepareHostnamesForTransfer(body.HostnamesToMigrate, dID)
+
+		select {
+		case err = <-errCh:
+
+		case <-req.Context().Done():
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if err != nil {
+			if errors.Is(err, cluster.ErrHostnameNotAllowed) {
+				log.Info("hostname not allowed", "err", err)
+				http.Error(rw, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			log.Error("failed preparing hostnames for transfer", "err", err)
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		log.Debug("transferring hostnames", "cnt", len(body.HostnamesToMigrate))
+		// Start the goroutine to migrate the hostname
+		err = clusterService.TransferHostnames(req.Context(), body.HostnamesToMigrate, dID)
+		if err != nil {
+			log.Error("failed starting transfer of hostnames", "err", err)
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		rw.WriteHeader(http.StatusOK)
+		// Send message saying it has been started
+	}
+
 }
 
 func createStatusHandler(log log.Logger, sclient provider.StatusClient) http.HandlerFunc {

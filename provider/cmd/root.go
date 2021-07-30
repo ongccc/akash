@@ -27,6 +27,19 @@ func RootCmd() *cobra.Command {
 	cmd.AddCommand(serviceStatusCmd())
 	cmd.AddCommand(RunCmd())
 	cmd.AddCommand(LeaseShellCmd())
+	cmd.AddCommand(hostnameOperatorCmd())
 
+	return cmd
+}
+
+func hostnameOperatorCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:          "hostname-operator",
+		Short:        "",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return doHostnameOperator(cmd)
+		},
+	}
 	return cmd
 }

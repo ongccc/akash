@@ -3,16 +3,12 @@ package kube
 // nolint:deadcode,golint
 
 import (
-	"crypto/sha256"
-	"encoding/base32"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/ovrclk/akash/provider/cluster/util"
-	uuid "github.com/satori/go.uuid"
-
 	"github.com/tendermint/tendermint/libs/log"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -940,8 +936,7 @@ func newIngressBuilder(log log.Logger, settings Settings, lid mtypes.LeaseID, gr
 }
 
 func ingressHost(lid mtypes.LeaseID, svc *manifest.Service) string {
-	uid := uuid.NewV5(uuid.NamespaceDNS, lid.String()+svc.Name).Bytes()
-	return strings.ToLower(base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(uid))
+	return util.IngressHost(lid, svc.Name)
 }
 
 func (b *ingressBuilder) create() (*netv1.Ingress, error) { // nolint:golint,unparam
@@ -994,13 +989,7 @@ func (b *ingressBuilder) rules() []netv1.IngressRule {
 
 // lidNS generates a unique sha256 sum for identifying a provider's object name.
 func lidNS(lid mtypes.LeaseID) string {
-	path := lid.String()
-	// DNS-1123 label must consist of lower case alphanumeric characters or '-',
-	// and must start and end with an alphanumeric character
-	// (e.g. 'my-name',  or '123-abc', regex used for validation
-	// is '[a-z0-9]([-a-z0-9]*[a-z0-9])?')
-	sha := sha256.Sum224([]byte(path))
-	return strings.ToLower(base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(sha[:]))
+	return clusterUtil.LeaseIdToNamespace(lid)
 }
 
 // manifestBuilder composes the k8s akashv1.Manifest type from LeaseID and

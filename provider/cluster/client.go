@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	akashv1 "github.com/ovrclk/akash/pkg/apis/akash.network/v1"
+	dtypes "github.com/ovrclk/akash/x/deployment/types"
 	"io"
 	"k8s.io/client-go/tools/remotecommand"
 	"math/rand"
@@ -62,12 +63,16 @@ type ReadClient interface {
 	LeaseHostnames(context.Context, mtypes.LeaseID) ([]string, error)
 	AllHostnames(context.Context) ([]ActiveHostname, error)
 	GetManifestGroup(context.Context, mtypes.LeaseID) (bool, akashv1.ManifestGroup, error)
+
+	ObserveHostnameState(ctx context.Context) (<- chan HostnameResourceEvent, error)
+	GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.Deployment, error)
+	GetHostnameDeploymentConnections(ctx context.Context) ([]LeaseIdHostnameConnection, error)
 }
 
 // Client interface lease and deployment methods
 type Client interface {
 	ReadClient
-	Deploy(ctx context.Context, lID mtypes.LeaseID, mgroup *manifest.Group, holdHostnames []string) error
+	Deploy(ctx context.Context, lID mtypes.LeaseID, mgroup *manifest.Group) error
 	TeardownLease(context.Context, mtypes.LeaseID) error
 	Deployments(context.Context) ([]ctypes.Deployment, error)
 	Inventory(context.Context) ([]ctypes.Node, error)
@@ -81,6 +86,14 @@ type Client interface {
 		stderr io.Writer,
 		tty bool,
 		tsq remotecommand.TerminalSizeQueue) (ctypes.ExecResult, error)
+
+	// Connect a given hostname to a deployment
+	ConnectHostnameToDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error
+
+	// Declare that a given deployment should be connected to a given hostname
+	DeclareHostnames(ctx context.Context, lID mtypes.LeaseID, hosts []string) error
+	// Purge any hostnames associated with a given deployment
+	PurgeDeclaredHostnames(ctx context.Context, lID mtypes.LeaseID) error
 }
 
 type LeaseIdHostnameConnection interface {
@@ -163,7 +176,31 @@ func NullClient() Client {
 	}
 }
 
-func (c *nullClient) Deploy(ctx context.Context, lid mtypes.LeaseID, mgroup *manifest.Group, holdHostnames []string) error {
+func (c *nullClient) ObserveHostnameState(ctx context.Context) (<- chan HostnameResourceEvent, error) {
+	return nil, errNotImplemented
+}
+func (c *nullClient) GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.Deployment, error) {
+	return nil, errNotImplemented
+}
+func (c *nullClient) GetHostnameDeploymentConnections(ctx context.Context) ([]LeaseIdHostnameConnection, error) {
+	return nil, errNotImplemented
+}
+
+// Connect a given hostname to a deployment
+func (c *nullClient) ConnectHostnameToDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error {
+	return errNotImplemented
+}
+
+// Declare that a given deployment should be connected to a given hostname
+func (c *nullClient) DeclareHostnames(ctx context.Context, lID mtypes.LeaseID, hosts []string) error {
+	return errNotImplemented
+}
+// Purge any hostnames associated with a given deployment
+func (c *nullClient) PurgeDeclaredHostnames(ctx context.Context, lID mtypes.LeaseID) error {
+	return errNotImplemented
+}
+
+func (c *nullClient) Deploy(ctx context.Context, lid mtypes.LeaseID, mgroup *manifest.Group) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 

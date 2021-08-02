@@ -218,7 +218,7 @@ func (c *client) Deployments(ctx context.Context) ([]ctypes.Deployment, error) {
 	return deployments, nil
 }
 
-func (c *client) Deploy(ctx context.Context, lid mtypes.LeaseID, group *manifest.Group, holdHostnames []string) error {
+func (c *client) Deploy(ctx context.Context, lid mtypes.LeaseID, group *manifest.Group) error {
 	if err := applyNS(ctx, c.kc, newNSBuilder(c.settings, lid, group)); err != nil {
 		c.log.Error("applying namespace", "err", err, "lease", lid)
 		return err
@@ -270,6 +270,7 @@ func (c *client) Deploy(ctx context.Context, lid mtypes.LeaseID, group *manifest
 			}
 		}
 
+		/**
 		for expIdx := range service.Expose {
 			expose := service.Expose[expIdx]
 			if !util.ShouldBeIngress(expose) {
@@ -279,7 +280,7 @@ func (c *client) Deploy(ctx context.Context, lid mtypes.LeaseID, group *manifest
 				c.log.Error("applying ingress", "err", err, "lease", lid, "service", service.Name, "expose", expose)
 				return err
 			}
-		}
+		}**/
 	}
 
 	return nil
@@ -298,62 +299,47 @@ func (c *client) TeardownLease(ctx context.Context, lid mtypes.LeaseID) error {
 	return result
 }
 
-// TODO - add list of prohibited hostnames
-func (c *client) DeclareHostnames(ctx context.Context, lID mtypes.LeaseID, group *manifest.Group) error {
+
+func (c *client) DeclareHostnames(ctx context.Context, lID mtypes.LeaseID, hosts []string) error {
+	// Label each entry with the standard labels
 	labels := make(map[string]string)
 	appendLeaseLabels(lID, labels)
 
-	for _, service := range group.Services {
-		for _, expose := range service.Expose {
-			if !util.ShouldBeIngress(expose) {
-				continue
+	for _, host := range hosts {
+		foundEntry, err := c.ac.AkashV1().ProviderHosts(c.ns).Get(ctx, host, metav1.GetOptions{})
+		exists := true
+		resourceVersion := foundEntry.ObjectMeta.ResourceVersion
+		if err != nil {
+			if kubeErrors.IsNotFound(err) {
+				exists = false
+			} else {
+				return err
 			}
+		}
 
-			var hosts []string
+		obj := akashtypes.ProviderHost{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: host, // Name is always the hostname, to prevent duplicates
+				Labels: labels,
+				ResourceVersion: resourceVersion,
+			},
+			Spec:       akashtypes.ProviderHostSpec{
+				Owner:       lID.GetOwner(),
+				Hostname:    host,
+				Dseq:        lID.GetDSeq(),
+			},
+			Status:     akashtypes.ProviderHostStatus{},
 
-			if c.settings.DeploymentIngressStaticHosts {
-				uid := ingressHost(lID, &service)
-				host := fmt.Sprintf("%s.%s", uid, c.settings.DeploymentIngressDomain)
-				hosts = append(hosts, host)
-			}
+		}
 
-			for _, host := range expose.Hosts {
-				hosts = append(hosts, host)
-			}
-			for _, host := range hosts {
-				_, err := c.ac.AkashV1().ProviderHosts(c.ns).Get(ctx, host, metav1.GetOptions{})
-				exists := true
-				if err != nil {
-					if kubeErrors.IsNotFound(err) {
-						exists = false
-					} else {
-						return err
-					}
-				}
-
-				obj := akashtypes.ProviderHost{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: host,
-						Labels: labels,
-					},
-					Spec:       akashtypes.ProviderHostSpec{
-						Owner:       lID.GetOwner(),
-						Hostname:    host,
-						Dseq:        lID.GetDSeq(),
-					},
-					Status:     akashtypes.ProviderHostStatus{},
-
-				}
-
-				if exists {
-					_, err = c.ac.AkashV1().ProviderHosts(c.ns).Update(ctx, &obj, metav1.UpdateOptions{})
-				} else {
-					_, err = c.ac.AkashV1().ProviderHosts(c.ns).Create(ctx, &obj, metav1.CreateOptions{})
-				}
-				if err != nil {
-					return err
-				}
-			}
+		// Create or update the entry
+		if exists {
+			_, err = c.ac.AkashV1().ProviderHosts(c.ns).Update(ctx, &obj, metav1.UpdateOptions{})
+		} else {
+			_, err = c.ac.AkashV1().ProviderHosts(c.ns).Create(ctx, &obj, metav1.CreateOptions{})
+		}
+		if err != nil {
+			return err
 		}
 	}
 
@@ -1035,6 +1021,7 @@ func (ev hostnameResourceEvent) GetEventType() cluster.ProviderResourceEvent {
 }
 
 func (c *client) LeaseHostnames(ctx context.Context, lID mtypes.LeaseID) ([]string, error) {
+	// TODO - I think this should just query the CRDs ?
 	ns := lidNS(lID)
 
 	pager := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {

@@ -18,6 +18,7 @@ import (
 	mtypes "github.com/ovrclk/akash/x/market/types"
 	"github.com/tendermint/tendermint/libs/log"
 	"sync"
+	clusterutil "github.com/ovrclk/akash/provider/cluster/util"
 )
 
 type deploymentState string
@@ -331,14 +332,55 @@ func (dm *deploymentManager) doDeploy() ([]string, error) {
 	// Don't use a context tied to the lifecycle, as we don't want to cancel Kubernetes operations
 	ctx := context.Background()
 
-	err = dm.client.Deploy(ctx, dm.lease, dm.mgroup, withheldHostnames)
+	err = dm.client.Deploy(ctx, dm.lease, dm.mgroup)
 	label := "success"
 	if err != nil {
 		label = "fail"
 	}
 	deploymentCounter.WithLabelValues("deploy", label).Inc()
-	return withheldHostnames, err
 
+	// Figure out what hostnames to declare
+	blockedHostnames := make(map[string]struct{})
+	for _, hostname := range withheldHostnames {
+		blockedHostnames[hostname] = struct{}{}
+	}
+	var hosts []string
+	for _, service := range dm.mgroup.Services {
+		for _, expose := range service.Expose {
+			if !util.ShouldBeIngress(expose) {
+				continue
+			}
+
+			// TODO read this value from c.settings.DeploymentIngressStaticHosts somehow
+			deploymentIngressStaticHosts := true
+			// TODO read this value from c.settings.DeploymentIngressDomain somehow
+			deploymentIngressDomain := "localhost"
+			if  deploymentIngressStaticHosts{
+				uid := clusterutil.IngressHost(dm.lease, service.Name)
+				host := fmt.Sprintf("%s.%s", uid, deploymentIngressDomain)
+				hosts = append(hosts, host)
+			}
+
+			for _, host := range expose.Hosts {
+				_, blocked := blockedHostnames[host]
+				if ! blocked {
+					hosts = append(hosts, host)
+				}
+			}
+		}
+	}
+
+	// Possible issue here - if the entries already exist
+	// then this winds up being a no-op. I think the issue here is
+	// if hostnames get swapped around inside the same SDL its a problem
+	err = dm.client.DeclareHostnames(ctx, dm.lease, hosts)
+	if err != nil {
+		// TODO - counter
+		return withheldHostnames, err
+	}
+	// TODO - counter
+
+	return withheldHostnames, nil
 }
 
 func (dm *deploymentManager) doTeardown() error {
@@ -363,6 +405,21 @@ func (dm *deploymentManager) doTeardown() error {
 		label = "fail"
 	}
 	deploymentCounter.WithLabelValues("teardown", label).Inc()
+
+	result = retry.Do(func() error {
+		err := dm.client.PurgeDeclaredHostnames(ctx, dm.lease)
+		if err != nil {
+			dm.log.Error("lease teardown failed", "err", err)
+		}
+		return err
+	},
+		retry.Attempts(50),
+		retry.Delay(100*time.Millisecond),
+		retry.MaxDelay(3000*time.Millisecond),
+		retry.DelayType(retry.BackOffDelay),
+		retry.LastErrorOnly(true))
+
+	// TODO - counter
 	return result
 }
 

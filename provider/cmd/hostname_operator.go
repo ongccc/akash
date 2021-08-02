@@ -5,7 +5,6 @@ import (
 	"github.com/ovrclk/akash/manifest"
 	"github.com/ovrclk/akash/provider/cluster"
 	clusterClient "github.com/ovrclk/akash/provider/cluster/kube"
-	ctypes "github.com/ovrclk/akash/provider/cluster/types"
 	"github.com/ovrclk/akash/provider/cluster/util"
 	dtypes "github.com/ovrclk/akash/x/deployment/types"
 	mtypes "github.com/ovrclk/akash/x/market/types"
@@ -14,12 +13,6 @@ import (
 	"strings"
 )
 
-type dummy interface {
-	ObserveHostnameState(ctx context.Context) (<- chan cluster.HostnameResourceEvent, error)
-	GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.Deployment, error)
-	ConnectHostnameToDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error
-	GetHostnameDeploymentConnections(ctx context.Context) ([]cluster.LeaseIdHostnameConnection, error)
-}
 
 type managedHostname struct {
 	lastEvent cluster.HostnameResourceEvent
@@ -42,7 +35,7 @@ func (op *hostnameOperator) run(parentCtx context.Context) error {
 	// and then use that data to populate op.hostnames
 	ctx, cancel := context.WithCancel(parentCtx)
 
-	connections, err := op.client.(dummy).GetHostnameDeploymentConnections(ctx)
+	connections, err := op.client.GetHostnameDeploymentConnections(ctx)
 	if err != nil {
 		cancel()
 		return err
@@ -66,7 +59,7 @@ func (op *hostnameOperator) run(parentCtx context.Context) error {
 			"port", entry.presentExternalPort)
 	}
 
-	events, err := op.client.(dummy).ObserveHostnameState(ctx)
+	events, err := op.client.ObserveHostnameState(ctx)
 	if err != nil {
 		cancel()
 		return err
@@ -80,6 +73,7 @@ func (op *hostnameOperator) run(parentCtx context.Context) error {
 
 		case ev, ok := <- events:
 			if !ok {
+				op.log.Info("observation stopped")
 				break loop
 			}
 			err = op.applyEvent(ctx, ev)
@@ -103,7 +97,7 @@ func (op *hostnameOperator) applyEvent(ctx context.Context, ev cluster.HostnameR
 		return op.applyAddOrUpdateEvent(ctx, ev)
 	default:
 		// TODO - ????
-		panic("boom")
+		panic("boom" + ev.GetEventType())
 	}
 
 	return nil
@@ -115,7 +109,7 @@ func (op *hostnameOperator) applyAddOrUpdateEvent(ctx context.Context, ev cluste
 		Owner: ev.GetOwner().String(),
 		DSeq:  ev.GetDeploymentSequence(),
 	}
-	manifests, err := op.client.(dummy).GetDeployments(ctx, dID)
+	manifests, err := op.client.GetDeployments(ctx, dID)
 	if err != nil {
 		return err
 	}
@@ -193,7 +187,7 @@ func (op *hostnameOperator) applyAddOrUpdateEvent(ctx context.Context, ev cluste
 		if changed {
 			op.log.Debug("Updating ingress")
 			// Update or create the existing ingress
-			err = op.client.(dummy).ConnectHostnameToDeployment(ctx, ev.GetHostname(), selectedManifest.LeaseID(), selectedService.Name, externalPort)
+			err = op.client.ConnectHostnameToDeployment(ctx, ev.GetHostname(), selectedManifest.LeaseID(), selectedService.Name, externalPort)
 		}
 	} else {
 		op.log.Debug("Swapping ingress to new deployment")

@@ -36,6 +36,7 @@ var errDestintationDeploymentDoesNotExist = errors.New("destination deployment d
 var errTransferRunning = errors.New("hostname transfer already running")
 
 func (s *service) transferHostnames(req transferHostnamesRequest) error {
+	// TODO - eliminate this in favor of just calling DeclareHostnames
 	ownerAddr, err := req.destination.GetOwnerAddress()
 	if err != nil {
 		return err

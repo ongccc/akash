@@ -25,6 +25,8 @@ spec:
                   type: string
                 owner:
                   type: string
+                provider:
+                  type: string
                 dseq:
                   type: integer
                 gseq:

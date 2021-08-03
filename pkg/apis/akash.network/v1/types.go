@@ -363,10 +363,11 @@ type ProviderHostStatus struct {
 
 type ProviderHostSpec struct {
 	Owner string `json:"owner"`
+	Provider string `json:"provider"`
 	Hostname string `json:"hostname"`
 	Dseq uint64 `json:"dseq"`
-	Gseq uint64 `json:"gseq"`
-	Oseq uint64 `json:"oseq"`
+	Gseq uint32 `json:"gseq"`
+	Oseq uint32 `json:"oseq"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

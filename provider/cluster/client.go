@@ -22,8 +22,6 @@ import (
 	"github.com/ovrclk/akash/types/unit"
 	mquery "github.com/ovrclk/akash/x/market/query"
 	mtypes "github.com/ovrclk/akash/x/market/types"
-
-	sdktypes "github.com/cosmos/cosmos-sdk/types"
 )
 
 var (
@@ -49,8 +47,14 @@ const (
 )
 
 type HostnameResourceEvent interface {
+	/**
 	GetOwner() sdktypes.Address
-	GetDeploymentSequence() uint64
+	GetDseq() uint64
+	GetOseq() uint32
+	GetGseq() uint32
+	GetProvider() sdktypes.Address
+	 */
+	GetLeaseID() mtypes.LeaseID
 	GetEventType() ProviderResourceEvent
 	GetHostname() string
 }
@@ -66,7 +70,7 @@ type ReadClient interface {
 
 	// TODO - probably move some of this to a separate interface ??
 	ObserveHostnameState(ctx context.Context) (<- chan HostnameResourceEvent, error)
-	GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.Deployment, error)
+	//GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.Deployment, error)
 	GetHostnameDeploymentConnections(ctx context.Context) ([]LeaseIdHostnameConnection, error)
 }
 

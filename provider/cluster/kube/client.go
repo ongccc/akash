@@ -328,6 +328,9 @@ func (c *client) DeclareHostnames(ctx context.Context, lID mtypes.LeaseID, hosts
 				Hostname:    host,
 				Owner:       lID.GetOwner(),
 				Dseq:        lID.GetDSeq(),
+				Oseq: 		 lID.GetOSeq(),
+				Gseq:        lID.GetGSeq(),
+				Provider: 	lID.GetProvider(),
 			},
 			Status:     akashtypes.ProviderHostStatus{},
 		}
@@ -1005,20 +1008,26 @@ func (c *client) deploymentsForLease(ctx context.Context, lid mtypes.LeaseID) ([
 type hostnameResourceEvent struct {
 	eventType cluster.ProviderResourceEvent
 	hostname string
-	dseq uint64
+
 	owner sdktypes.Address
+	dseq uint64
+	oseq uint32
+	gseq uint32
+	provider sdktypes.Address
 }
 
-func (ev hostnameResourceEvent) GetOwner() sdktypes.Address {
-	return ev.owner
+func (ev hostnameResourceEvent) GetLeaseID() mtypes.LeaseID {
+	return mtypes.LeaseID{
+		Owner:    ev.owner.String(),
+		DSeq:     ev.dseq,
+		GSeq:     ev.gseq,
+		OSeq:     ev.oseq,
+		Provider: ev.provider.String(),
+	}
 }
 
 func (ev hostnameResourceEvent) GetHostname() string {
 	return ev.hostname
-}
-
-func (ev hostnameResourceEvent) GetDeploymentSequence() uint64 {
-	return ev.dseq
 }
 
 func (ev hostnameResourceEvent) GetEventType() cluster.ProviderResourceEvent {
@@ -1097,11 +1106,18 @@ func (c *client) ObserveHostnameState(ctx context.Context) (<- chan cluster.Host
 		if err != nil {
 			return nil, err
 		}
+		providerAddr, err := sdktypes.AccAddressFromBech32(v.Spec.Provider)
+		if err != nil {
+			return nil, err
+		}
 		ev := hostnameResourceEvent{
 			eventType: cluster.ProviderResourceAdd,
 			hostname:  v.Spec.Hostname,
+			oseq: v.Spec.Oseq,
+			gseq: v.Spec.Gseq,
 			dseq:      v.Spec.Dseq,
 			owner:     ownerAddr,
+			provider: providerAddr,
 		}
 		evData[i] = ev
 	}
@@ -1130,10 +1146,18 @@ func (c *client) ObserveHostnameState(ctx context.Context) (<- chan cluster.Host
 					// ?
 					panic(err)
 				}
+				providerAddr, err := sdktypes.AccAddressFromBech32(ph.Spec.Provider)
+				if err != nil {
+					// ?
+					panic(err)
+				}
 				ev := hostnameResourceEvent{
 					hostname:  ph.Spec.Hostname,
 					dseq:      ph.Spec.Dseq,
+					oseq: ph.Spec.Oseq,
+					gseq: ph.Spec.Gseq,
 					owner:     ownerAddr,
+					provider: providerAddr,
 				}
 				switch result.Type {
 

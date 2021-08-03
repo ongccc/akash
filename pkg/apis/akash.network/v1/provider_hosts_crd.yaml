@@ -27,8 +27,11 @@ spec:
                   type: string
                 dseq:
                   type: integer
-  # either Namespaced or Cluster
-  scope: Namespaced
+                gseq:
+                  type: integer
+                oseq:
+                  type: integer
+
   names:
     # plural name to be used in the URL: /apis/<group>/<version>/<plural>
     plural: providerhosts

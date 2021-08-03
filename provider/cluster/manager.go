@@ -355,7 +355,7 @@ func (dm *deploymentManager) doDeploy() ([]string, error) {
 			deploymentIngressStaticHosts := true
 			// TODO read this value from c.settings.DeploymentIngressDomain somehow
 			deploymentIngressDomain := "localhost"
-			if  deploymentIngressStaticHosts{
+			if deploymentIngressStaticHosts {
 				uid := clusterutil.IngressHost(dm.lease, service.Name)
 				host := fmt.Sprintf("%s.%s", uid, deploymentIngressDomain)
 				hosts = append(hosts, host)

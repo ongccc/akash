@@ -92,15 +92,20 @@ func (op *hostnameOperator) applyEvent(ctx context.Context, ev cluster.HostnameR
 	op.log.Debug("apply event", "event-type", ev.GetEventType(),  "hostname", ev.GetHostname())
 	switch ev.GetEventType() {
 	case cluster.ProviderResourceDelete:
-		// TODO - note that on delete the resource might be gone anyways because the namespace is deleted
+		// note that on delete the resource might be gone anyways because the namespace is deleted
+		return op.applyDeleteEvent(ctx, ev)
 	case cluster.ProviderResourceAdd, cluster.ProviderResourceUpdate:
 		return op.applyAddOrUpdateEvent(ctx, ev)
 	default:
 		// TODO - ????
-		panic("boom" + ev.GetEventType())
+		panic(ev.GetEventType())
 	}
 
-	return nil
+}
+
+func (op *hostnameOperator) applyDeleteEvent(ctx context.Context, ev cluster.HostnameResourceEvent) error {
+	leaseID := mtypes.LeaseID{} // TODO - get real value here
+	return op.client.RemoveHostnameFromDeployment(ctx, ev.GetHostname(), leaseID, true)
 }
 
 func (op *hostnameOperator) applyAddOrUpdateEvent(ctx context.Context, ev cluster.HostnameResourceEvent) error {

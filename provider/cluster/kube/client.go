@@ -317,6 +317,7 @@ func (c *client) DeclareHostnames(ctx context.Context, lID mtypes.LeaseID, hosts
 			}
 		}
 
+		// TODO - probably need to put in the Group sequence & order sequence number here as well
 		obj := akashtypes.ProviderHost{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: host, // Name is always the hostname, to prevent duplicates
@@ -324,12 +325,11 @@ func (c *client) DeclareHostnames(ctx context.Context, lID mtypes.LeaseID, hosts
 				ResourceVersion: resourceVersion,
 			},
 			Spec:       akashtypes.ProviderHostSpec{
-				Owner:       lID.GetOwner(),
 				Hostname:    host,
+				Owner:       lID.GetOwner(),
 				Dseq:        lID.GetDSeq(),
 			},
 			Status:     akashtypes.ProviderHostStatus{},
-
 		}
 
 		// Create or update the entry
@@ -346,12 +346,16 @@ func (c *client) DeclareHostnames(ctx context.Context, lID mtypes.LeaseID, hosts
 	return nil
 }
 
+func kubeSelectorForLease(dst *strings.Builder, lID mtypes.LeaseID) {
+	fmt.Fprintf(dst, "%s=%s", akashLeaseOwnerLabelName, lID.Owner)
+	fmt.Fprintf(dst, ",%s=%d", akashLeaseDSeqLabelName, lID.DSeq)
+	fmt.Fprintf(dst, ",%s=%d", akashLeaseGSeqLabelName, lID.GSeq)
+	fmt.Fprintf(dst, ",%s=%d", akashLeaseOSeqLabelName, lID.OSeq)
+}
+
 func (c *client) PurgeDeclaredHostnames(ctx context.Context, lID mtypes.LeaseID) error {
 	labelSelector := &strings.Builder{}
-	fmt.Fprintf(labelSelector, "%s=%s", akashLeaseOwnerLabelName, lID.Owner)
-	fmt.Fprintf(labelSelector, ",%s=%d", akashLeaseDSeqLabelName, lID.DSeq)
-	fmt.Fprintf(labelSelector, ",%s=%d", akashLeaseGSeqLabelName, lID.GSeq)
-	fmt.Fprintf(labelSelector, ",%s=%d", akashLeaseOSeqLabelName, lID.OSeq)
+	kubeSelectorForLease(labelSelector, lID)
 	result := c.ac.AkashV1().ProviderHosts(c.ns).DeleteCollection(ctx, metav1.DeleteOptions{}, metav1.ListOptions{
 		LabelSelector:       labelSelector.String(),
 	})
@@ -510,6 +514,7 @@ func (c *client) LeaseStatus(ctx context.Context, lid mtypes.LeaseID) (*ctypes.L
 		serviceStatus[deployment.Name] = status
 	}
 
+	// TODO - probably list the CRDs here
 	ingress, err := c.kc.NetworkingV1().Ingresses(lidNS(lid)).List(ctx, metav1.ListOptions{})
 	label := metricsutils.SuccessLabel
 	if err != nil {
@@ -1135,9 +1140,12 @@ func (c *client) ObserveHostnameState(ctx context.Context) (<- chan cluster.Host
 				case watch.Added:
 					ev.eventType = cluster.ProviderResourceAdd
 				case watch.Modified:
+					ev.eventType = cluster.ProviderResourceUpdate
 				case watch.Deleted:
+					ev.eventType = cluster.ProviderResourceDelete
 
 				default:
+					// TODO - check for watch.Error and get data from that?
 					continue
 				}
 
@@ -1185,9 +1193,33 @@ func (c *client) ConnectHostnameToDeployment(ctx context.Context, hostname strin
 	return err
 }
 
-func (c *client) RemoveHostnameFromDeployment(hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error {
-	// TODO
-	return nil
+func (c *client) RemoveHostnameFromDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, allowMissing bool) error {
+	ns := lidNS(leaseID)
+	labelSelector := &strings.Builder{}
+	kubeSelectorForLease(labelSelector, leaseID)
+
+	fieldSelector := &strings.Builder{}
+	fmt.Fprintf(fieldSelector, "metadata.name=%s", hostname)
+
+	// This delete only works if the ingress exists & the labels match the lease ID given
+	err := c.kc.NetworkingV1().Ingresses(ns).DeleteCollection(ctx, metav1.DeleteOptions{}, metav1.ListOptions{
+		TypeMeta:             metav1.TypeMeta{},
+		LabelSelector:        labelSelector.String(),
+		FieldSelector:        fieldSelector.String(),
+		Watch:                false,
+		AllowWatchBookmarks:  false,
+		ResourceVersion:      "",
+		ResourceVersionMatch: "",
+		TimeoutSeconds:       nil,
+		Limit:                0,
+		Continue:             "",
+	})
+
+	if err != nil && allowMissing && kubeErrors.IsNotFound(err) {
+		return nil
+	}
+
+	return err
 }
 
 var anError = errors.New("boom")

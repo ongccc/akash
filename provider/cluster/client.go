@@ -64,6 +64,7 @@ type ReadClient interface {
 	AllHostnames(context.Context) ([]ActiveHostname, error)
 	GetManifestGroup(context.Context, mtypes.LeaseID) (bool, akashv1.ManifestGroup, error)
 
+	// TODO - probably move some of this to a separate interface ??
 	ObserveHostnameState(ctx context.Context) (<- chan HostnameResourceEvent, error)
 	GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.Deployment, error)
 	GetHostnameDeploymentConnections(ctx context.Context) ([]LeaseIdHostnameConnection, error)
@@ -89,6 +90,8 @@ type Client interface {
 
 	// Connect a given hostname to a deployment
 	ConnectHostnameToDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error
+	// Remove a given hostname from a deployment
+	RemoveHostnameFromDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, allowMissing bool) error
 
 	// Declare that a given deployment should be connected to a given hostname
 	DeclareHostnames(ctx context.Context, lID mtypes.LeaseID, hosts []string) error
@@ -174,6 +177,10 @@ func NullClient() Client {
 		leases: make(map[string]*nullLease),
 		mtx:    sync.Mutex{},
 	}
+}
+
+func (c *nullClient) RemoveHostnameFromDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, allowMissing bool) error {
+	return errNotImplemented
 }
 
 func (c *nullClient) ObserveHostnameState(ctx context.Context) (<- chan HostnameResourceEvent, error) {

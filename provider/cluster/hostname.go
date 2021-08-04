@@ -66,10 +66,12 @@ func prepareHostnamesImpl(store map[string]dtypes.DeploymentID, hostnames []stri
 				toChange = append(toChange, hostname)
 			} else {
 				errCh <- fmt.Errorf("%w: host %q in use", ErrHostnameNotAllowed, hostname)
+				return
 			}
 		}
 	}
 
+	// Swap over each hostname
 	for _, hostname := range toChange {
 		store[hostname] = dID
 	}

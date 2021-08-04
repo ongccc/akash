@@ -54,7 +54,7 @@ type Client interface {
 		stderr io.Writer,
 		tty bool,
 		tsq <-chan remotecommand.TerminalSize) error
-	MigrateHostnames(ctx context.Context, hostnames []string, dseq uint64) error
+	MigrateHostnames(ctx context.Context, hostnames []string, dseq uint64, gseq uint32) error
 }
 
 type LeaseKubeEvent struct {
@@ -364,7 +364,7 @@ func (c *client) SubmitManifest(ctx context.Context, dseq uint64, mani manifest.
 	return createClientResponseErrorIfNotOK(resp, responseBuf)
 }
 
-func (c *client) MigrateHostnames(ctx context.Context, hostnames []string, dseq uint64) error {
+func (c *client) MigrateHostnames(ctx context.Context, hostnames []string, dseq uint64, gseq uint32) error {
 	uri, err := makeURI(c.host, "hostname/migrate")
 	if err != nil {
 		return err
@@ -373,6 +373,7 @@ func (c *client) MigrateHostnames(ctx context.Context, hostnames []string, dseq 
 	body := migrateRequestBody{
 		HostnamesToMigrate: hostnames,
 		DestinationDSeq:    dseq,
+		DestinationGSeq: gseq,
 	}
 
 	buf, err := json.Marshal(body)

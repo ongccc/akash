@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	lifecycle "github.com/boz/go-lifecycle"
+	sdktypes "github.com/cosmos/cosmos-sdk/types"
 	akashv1 "github.com/ovrclk/akash/pkg/apis/akash.network/v1"
 	dtypes "github.com/ovrclk/akash/x/deployment/types"
 	"github.com/pkg/errors"
@@ -39,7 +40,7 @@ type Cluster interface {
 // StatusClient is the interface which includes status of service
 type StatusClient interface {
 	Status(context.Context) (*ctypes.Status, error)
-	FindActiveLeases(ctx context.Context, dID dtypes.DeploymentID) ([]ActiveLease, error)
+	FindActiveLease(ctx context.Context, owner sdktypes.Address, dseq uint64, gseq uint32) (bool, ActiveLease, error)
 }
 
 // Service manage compute cluster for the provider.  Will eventually integrate with kubernetes, etc...
@@ -50,7 +51,7 @@ type Service interface {
 	Ready() <-chan struct{}
 	Done() <-chan struct{}
 	HostnameService() HostnameServiceClient
-	TransferHostnames(ctx context.Context, hostnames []string, dID dtypes.DeploymentID) error
+	TransferHostnames(ctx context.Context, hostnames []string, leaseID mtypes.LeaseID) error
 }
 
 // NewService returns new Service instance
@@ -102,10 +103,7 @@ func NewService(ctx context.Context, session session.Session, bus pubsub.Bus, cl
 		statusch:  make(chan chan<- *ctypes.Status),
 		managers:  make(map[mtypes.LeaseID]*deploymentManager),
 		managerch: make(chan *deploymentManager),
-		transferHostnamesRequestCh: make(chan transferHostnamesRequest),
 		checkDeploymentExistsRequestCh: make(chan checkDeploymentExistsRequest),
-		xferHostnameManagerCh: make(chan *transferHostnamesManager),
-		xferHostnameManagers: make(map[string]*transferHostnamesManager),
 
 		log: log,
 		lc:  lc,
@@ -126,22 +124,22 @@ type service struct {
 	inventory *inventoryService
 	hostnames *hostnameService
 
-	transferHostnamesRequestCh chan transferHostnamesRequest
 	checkDeploymentExistsRequestCh chan checkDeploymentExistsRequest
 	statusch chan chan<- *ctypes.Status
 	managers map[mtypes.LeaseID]*deploymentManager
-	xferHostnameManagers map[string]*transferHostnamesManager
 
 	managerch chan *deploymentManager
-	xferHostnameManagerCh chan *transferHostnamesManager
 
 	log log.Logger
 	lc  lifecycle.Lifecycle
 }
 
 type checkDeploymentExistsRequest struct {
-	deploymentID dtypes.DeploymentID
-	responseCh chan <- []mtypes.LeaseID
+	owner sdktypes.Address
+	dseq uint64
+	gseq uint32
+
+	responseCh chan <- mtypes.LeaseID
 }
 
 type ActiveLease struct {
@@ -151,44 +149,50 @@ type ActiveLease struct {
 
 var errNoManifestGroup = errors.New("no manifest group could be found")
 
-func (s *service) FindActiveLeases(ctx context.Context, dID dtypes.DeploymentID) ([]ActiveLease, error){
-	response := make(chan []mtypes.LeaseID, 1)
+func (s *service) FindActiveLease(ctx context.Context, owner sdktypes.Address, dseq uint64, gseq uint32) (bool, ActiveLease, error) {
+	response := make(chan mtypes.LeaseID, 1)
 	req := checkDeploymentExistsRequest{
 		responseCh: response,
-		deploymentID: dID,
+		dseq: dseq,
+		gseq: gseq,
+		owner: owner,
 	}
 	select {
 	case s.checkDeploymentExistsRequestCh <- req:
 	case <- ctx.Done():
-		return nil, ctx.Err()
+		return false, ActiveLease{}, ctx.Err()
 	}
 
-	var leases []mtypes.LeaseID
+
+	var leaseID mtypes.LeaseID
+	var ok bool
 	select {
-		case leases = <- response:
+		case leaseID, ok = <- response:
+			if !ok {
+				return false, ActiveLease{}, nil
+			}
 
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return false, ActiveLease{}, ctx.Err()
 	}
 
-	result := make([]ActiveLease, 0, len(leases))
-	for _, leaseID := range leases {
-		found, mgroup, err := s.client.GetManifestGroup(ctx, leaseID)
-		if err != nil {
-			return nil, err
-		}
 
-		if !found {
-			return nil, errNoManifestGroup
-		}
-
-		result = append(result, ActiveLease{
-			ID:   leaseID,
-			Group: mgroup,
-		})
+	found, mgroup, err := s.client.GetManifestGroup(ctx, leaseID)
+	if err != nil {
+		return false, ActiveLease{}, err
 	}
 
-	return result, nil
+	if !found {
+		return false, ActiveLease{},  errNoManifestGroup
+	}
+
+	result := ActiveLease{
+		ID:   leaseID,
+		Group: mgroup,
+	}
+
+
+	return true, result, nil
 }
 
 func (s *service) Close() error {
@@ -216,30 +220,9 @@ func (s *service) HostnameService() HostnameServiceClient {
 	return s.hostnames
 }
 
-func (s *service) TransferHostnames(ctx context.Context, hostnames []string, dID dtypes.DeploymentID) error {
-	errCh := make(chan error, 1)
-	req := transferHostnamesRequest{
-		hostnames:   hostnames,
-		destination: dID,
-		errCh: errCh,
-	}
-
-	select {
-	case s.transferHostnamesRequestCh <- req:
-	case <- ctx.Done():
-		return ctx.Err()
-	case <-s.lc.ShuttingDown():
-		return ErrNotRunning
-	}
-
-	select {
-	case err := <- errCh:
-		return err
-	case <- ctx.Done():
-		return ctx.Err()
-	case <-s.lc.ShuttingDown():
-		return ErrNotRunning
-	}
+func (s *service) TransferHostnames(ctx context.Context, hostnames []string, leaseID mtypes.LeaseID) error {
+	// TODO - shove this into a retry loop, otherwise if it fails the state gets inconsistent
+	return s.client.DeclareHostnames(ctx, leaseID, hostnames)
 }
 
 func (s *service) Status(ctx context.Context) (*ctypes.Status, error) {
@@ -340,11 +323,6 @@ loop:
 			}
 
 			delete(s.managers, dm.lease)
-		case req := <- s.transferHostnamesRequestCh:
-			err := s.transferHostnames(req)
-			req.errCh <- err
-		case mgr := <- s.xferHostnameManagerCh:
-			delete(s.xferHostnameManagers, mgr.ownerAddr.String())
 		case req := <- s.checkDeploymentExistsRequestCh:
 			s.doCheckDeploymentExists(req)
 		}
@@ -363,16 +341,15 @@ loop:
 }
 
 func (s *service) doCheckDeploymentExists(req checkDeploymentExistsRequest) {
-	result := make([]mtypes.LeaseID, 0)
-
 	for leaseID := range s.managers {
-		if leaseID.DeploymentID().Equals(req.deploymentID) {
-			result = append(result, leaseID)
-			break
+		// Check for a match
+		if  leaseID.GSeq == req.gseq && leaseID.DSeq == req.dseq && leaseID.Owner == req.owner.String() {
+			req.responseCh <- leaseID
+			return
 		}
 	}
 
-	req.responseCh <- result
+	close(req.responseCh)
 }
 
 func (s *service) teardownLease(lid mtypes.LeaseID) {

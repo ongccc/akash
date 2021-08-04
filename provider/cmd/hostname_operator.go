@@ -104,7 +104,7 @@ func (op *hostnameOperator) applyEvent(ctx context.Context, ev cluster.HostnameR
 }
 
 func (op *hostnameOperator) applyDeleteEvent(ctx context.Context, ev cluster.HostnameResourceEvent) error {
-	leaseID := mtypes.LeaseID{} // TODO - get real value here
+	leaseID := ev.GetLeaseID()
 	err := op.client.RemoveHostnameFromDeployment(ctx, ev.GetHostname(), leaseID, true)
 
 	if err == nil {
@@ -115,7 +115,6 @@ func (op *hostnameOperator) applyDeleteEvent(ctx context.Context, ev cluster.Hos
 }
 
 func (op *hostnameOperator) applyAddOrUpdateEvent(ctx context.Context, ev cluster.HostnameResourceEvent) error {
-
 	leaseID := ev.GetLeaseID()
 	// Fetch manifest group for the deployment
 	found, mgroup, err := op.client.GetManifestGroup(ctx, leaseID)
@@ -236,7 +235,4 @@ func doHostnameOperator(cmd *cobra.Command) error {
 	}
 
 	return op.run(cmd.Context())
-
-
-
 }

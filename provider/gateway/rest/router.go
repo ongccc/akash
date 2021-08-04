@@ -346,6 +346,7 @@ func leaseShellHandler(log log.Logger, mclient pmanifest.Client, cclient cluster
 type migrateRequestBody struct {
 	HostnamesToMigrate []string `json:"hostnames_to_migrate"`
 	DestinationDSeq uint64 `json:"destination_dseq"`
+	DestinationGSeq uint32 `json:"destination_gseq"`
 }
 
 func migrateHandler(log log.Logger, hostnameService cluster.HostnameServiceClient, clusterService cluster.Service) http.HandlerFunc{
@@ -369,8 +370,6 @@ func migrateHandler(log log.Logger, hostnameService cluster.HostnameServiceClien
 			return
 		}
 
-
-
 		owner := requestOwner(req)
 
 		// Make sure this hostname can be taken
@@ -380,27 +379,27 @@ func migrateHandler(log log.Logger, hostnameService cluster.HostnameServiceClien
 		}
 
 		//  make sure destination deployment actually exists
-		activeLeases, err := clusterService.FindActiveLeases(req.Context(), dID)
+		// TODO - should this check actually be checking for Lease ID here?
+		found, activeLease, err := clusterService.FindActiveLease(req.Context(), owner, body.DestinationDSeq, body.DestinationGSeq)
 		if err != nil {
 			log.Error("failed checking if destination deployment exists", "err", err)
 			rw.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
-		if len(activeLeases) == 0 {
+		if !found {
 			log.Info("destination deployment does not exist", "dseq", body.DestinationDSeq)
 			http.Error(rw, "destination deployment does not exist", http.StatusBadRequest)
 			return
 		}
 
 		// check that the destination leases can actually use the requested hostnames
+		// for a hostname to be migrated it must be declared
 		hostnamesInManifestGroups := make(map[string]struct{})
-		for _, activeLease := range activeLeases {
-			for _, service := range activeLease.Group.Services {
-				for _, expose := range service.Expose {
-					for _, host := range expose.Hosts {
-						hostnamesInManifestGroups[host] = struct{}{}
-					}
+		for _, service := range activeLease.Group.Services {
+			for _, expose := range service.Expose {
+				for _, host := range expose.Hosts {
+					hostnamesInManifestGroups[host] = struct{}{}
 				}
 			}
 		}
@@ -412,10 +411,13 @@ func migrateHandler(log log.Logger, hostnameService cluster.HostnameServiceClien
 				http.Error(rw, msg, http.StatusBadRequest)
 				return
 			}
-
 		}
 
+		leaseID := activeLease.ID
+
+		// Tell the hostname service to move the hostnames to the new deployment, unconditionally
 		log.Debug("preparing migration of hostnames", "cnt", len(body.HostnamesToMigrate))
+		// TODO - hostname service should work by owner, dseq, gseq,
 		errCh := hostnameService.PrepareHostnamesForTransfer(body.HostnamesToMigrate, dID)
 
 		select {
@@ -437,9 +439,11 @@ func migrateHandler(log log.Logger, hostnameService cluster.HostnameServiceClien
 			return
 		}
 
+		// Update the CRDs now
 		log.Debug("transferring hostnames", "cnt", len(body.HostnamesToMigrate))
-		// Start the goroutine to migrate the hostname
-		err = clusterService.TransferHostnames(req.Context(), body.HostnamesToMigrate, dID)
+
+		// Migrate the hostnames
+		err = clusterService.TransferHostnames(req.Context(), body.HostnamesToMigrate, leaseID)
 		if err != nil {
 			log.Error("failed starting transfer of hostnames", "err", err)
 			http.Error(rw, err.Error(), http.StatusInternalServerError)
@@ -447,7 +451,7 @@ func migrateHandler(log log.Logger, hostnameService cluster.HostnameServiceClien
 		}
 
 		rw.WriteHeader(http.StatusOK)
-		// Send message saying it has been started
+		// TODO - Send message saying it has been started
 	}
 
 }
@@ -558,10 +562,6 @@ func leaseStatusHandler(log log.Logger, cclient cluster.ReadClient) http.Handler
 			}
 			if kubeErrors.IsNotFound(err) {
 				http.Error(w, err.Error(), http.StatusNotFound)
-				return
-			}
-			if errors.Is(err, kubeClient.ErrNoGlobalServicesForLease) {
-				http.Error(w, err.Error(), http.StatusServiceUnavailable)
 				return
 			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)

@@ -55,7 +55,6 @@ import (
 var (
 	ErrLeaseNotFound            = errors.New("kube: lease not found")
 	ErrNoDeploymentForLease     = errors.New("kube: no deployments for lease")
-	ErrNoGlobalServicesForLease = errors.New("kube: no global services for lease")
 	ErrInternalError            = errors.New("kube: internal error")
 	ErrNoServiceForLease        = errors.New("no service for that lease")
 )
@@ -515,9 +514,11 @@ func (c *client) LeaseStatus(ctx context.Context, lid mtypes.LeaseID) (*ctypes.L
 			AvailableReplicas:  deployment.Status.AvailableReplicas,
 		}
 		serviceStatus[deployment.Name] = status
+
+		// TODO - fill in URIs for each entry by querying the CRDs
 	}
 
-	// TODO - probably list the CRDs here
+
 	ingress, err := c.kc.NetworkingV1().Ingresses(lidNS(lid)).List(ctx, metav1.ListOptions{})
 	label := metricsutils.SuccessLabel
 	if err != nil {
@@ -540,19 +541,16 @@ func (c *client) LeaseStatus(ctx context.Context, lid mtypes.LeaseID) (*ctypes.L
 		return nil, errors.Wrap(err, ErrInternalError.Error())
 	}
 
-	foundCnt := 0
+	// TODO - change this not to search for ingress, as they aren't guaranteed to exist
 	for _, ing := range ingress.Items {
 		service, found := serviceStatus[ing.Name]
 		if !found {
 			continue
 		}
-
 		hosts := make([]string, 0, len(ing.Spec.Rules)+(len(ing.Status.LoadBalancer.Ingress)*2))
-
 		for _, rule := range ing.Spec.Rules {
 			hosts = append(hosts, rule.Host)
 		}
-
 		if c.settings.DeploymentIngressExposeLBHosts {
 			for _, lbing := range ing.Status.LoadBalancer.Ingress {
 				if val := lbing.IP; val != "" {
@@ -565,7 +563,6 @@ func (c *client) LeaseStatus(ctx context.Context, lid mtypes.LeaseID) (*ctypes.L
 		}
 
 		service.URIs = hosts
-		foundCnt++
 	}
 
 	// Search for a Kubernetes service declared as nodeport
@@ -600,7 +597,6 @@ func (c *client) LeaseStatus(ctx context.Context, lid mtypes.LeaseID) (*ctypes.L
 							isValid = false // Skip this, since the Protocol is set to something not supported by Akash
 						}
 						if isValid {
-							foundCnt++
 							portsForDeployment = append(portsForDeployment, v)
 						}
 					}
@@ -608,11 +604,6 @@ func (c *client) LeaseStatus(ctx context.Context, lid mtypes.LeaseID) (*ctypes.L
 				forwardedPorts[deploymentName] = portsForDeployment
 			}
 		}
-	}
-
-	// If no ingress are found and at least 1 NodePort is not found, that is an error
-	if 0 == foundCnt {
-		return nil, ErrNoGlobalServicesForLease
 	}
 
 	response := &ctypes.LeaseStatus{

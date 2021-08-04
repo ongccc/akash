@@ -60,6 +60,8 @@ func migrateHostnamesCmd() *cobra.Command {
 	}
 
 	addCmdFlags(cmd)
+	cmd.Flags().Uint32(FlagGSeq, 1, "group sequence")
+
 	return cmd
 }
 
@@ -98,7 +100,9 @@ func migrateHostnames(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	err = gclient.MigrateHostnames(cmd.Context(), hostnames, dseq)
+	gseq, err := cmd.Flags().GetUint32("gseq")
+
+	err = gclient.MigrateHostnames(cmd.Context(), hostnames, dseq, gseq)
 	if err != nil {
 		return showErrorToUser(err)
 	}

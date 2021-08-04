@@ -418,6 +418,9 @@ func migrateHandler(log log.Logger, hostnameService cluster.HostnameServiceClien
 		// Tell the hostname service to move the hostnames to the new deployment, unconditionally
 		log.Debug("preparing migration of hostnames", "cnt", len(body.HostnamesToMigrate))
 		// TODO - hostname service should work by owner, dseq, gseq,
+		// TODO - the code below can wind up being a no-op because it is possible that destinatino is where
+		// the hostname already lives. The PrepareHostnamesForTransfer function should check for this
+		// and return an error
 		errCh := hostnameService.PrepareHostnamesForTransfer(body.HostnamesToMigrate, dID)
 
 		select {

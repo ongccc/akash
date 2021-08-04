@@ -196,6 +196,11 @@ func (op *hostnameOperator) applyAddOrUpdateEvent(ctx context.Context, ev cluste
 	} else {
 		op.log.Debug("Swapping ingress to new deployment")
 		// TODO - Delete the ingress in one namespace and recreate it in the correct one
+
+		err = op.client.RemoveHostnameFromDeployment(ctx, ev.GetHostname(), entry.presentLease, false)
+		if err == nil {
+			err = op.client.ConnectHostnameToDeployment(ctx, ev.GetHostname(), leaseID, selectedService.Name, externalPort)
+		}
 	}
 
 	if err == nil { // Update sored entry if everything went OK

@@ -153,7 +153,12 @@ func (dm *deploymentManager) run() {
 	// TODO - somehow at this point if this deployment holds a hostname
 	// which is also requested for use by any other deployment with the same owner
 	// then the hostname should get moved back to the other deployment at this time
-	defer dm.hostnameService.ReleaseHostnames(dm.lease.DeploymentID())
+	defer func() {
+		err := dm.hostnameService.ReleaseHostnames(dm.lease)
+		if err != nil {
+			dm.log.Error("failed releasing hostnames", "err", err)
+		}
+	}()
 
 loop:
 	for {
@@ -319,7 +324,7 @@ func (dm *deploymentManager) doDeploy() ([]string, error) {
 
 	allHostnames := util.AllHostnamesOfManifestGroup(*dm.mgroup)
 	// Either reserve the hostnames, or confirm that they already are held
-	reservationResult := dm.hostnameService.ReserveHostnames(allHostnames, dm.lease.DeploymentID())
+	reservationResult := dm.hostnameService.ReserveHostnames(allHostnames, dm.lease)
 	withheldHostnames, err := reservationResult.Wait(dm.lc.ShuttingDown())
 	if err != nil {
 		deploymentCounter.WithLabelValues("reserve-hostnames", "err").Inc()
@@ -327,7 +332,6 @@ func (dm *deploymentManager) doDeploy() ([]string, error) {
 		return nil, err
 	}
 	deploymentCounter.WithLabelValues("reserve-hostnames", "success").Inc()
-
 
 	// Don't use a context tied to the lifecycle, as we don't want to cancel Kubernetes operations
 	ctx := context.Background()
@@ -344,7 +348,8 @@ func (dm *deploymentManager) doDeploy() ([]string, error) {
 	for _, hostname := range withheldHostnames {
 		blockedHostnames[hostname] = struct{}{}
 	}
-	var hosts []string
+	hosts := make(map[string]manifest.ServiceExpose)
+	hostToServiceName := make(map[string]string)
 	for _, service := range dm.mgroup.Services {
 		for _, expose := range service.Expose {
 			if !util.ShouldBeIngress(expose) {
@@ -358,25 +363,26 @@ func (dm *deploymentManager) doDeploy() ([]string, error) {
 			if deploymentIngressStaticHosts {
 				uid := clusterutil.IngressHost(dm.lease, service.Name)
 				host := fmt.Sprintf("%s.%s", uid, deploymentIngressDomain)
-				hosts = append(hosts, host)
+				hosts[host] = expose
+				hostToServiceName[host] = service.Name
 			}
 
 			for _, host := range expose.Hosts {
 				_, blocked := blockedHostnames[host]
 				if ! blocked {
-					hosts = append(hosts, host)
+					hosts[host] = expose
+					hostToServiceName[host] = service.Name
 				}
 			}
 		}
 	}
 
-	// Possible issue here - if the entries already exist
-	// then this winds up being a no-op. I think the issue here is
-	// if hostnames get swapped around inside the same SDL its a problem
-	err = dm.client.DeclareHostnames(ctx, dm.lease, hosts)
-	if err != nil {
-		// TODO - counter
-		return withheldHostnames, err
+	for host, serviceExpose := range hosts {
+		err = dm.client.DeclareHostname(ctx, dm.lease, host, hostToServiceName[host], uint32(serviceExpose.ExternalPort))
+		if err != nil {
+			// TODO - counter
+			return withheldHostnames, err
+		}
 	}
 	// TODO - counter
 

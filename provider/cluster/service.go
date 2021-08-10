@@ -5,7 +5,6 @@ import (
 	lifecycle "github.com/boz/go-lifecycle"
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
 	akashv1 "github.com/ovrclk/akash/pkg/apis/akash.network/v1"
-	dtypes "github.com/ovrclk/akash/x/deployment/types"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -51,7 +50,7 @@ type Service interface {
 	Ready() <-chan struct{}
 	Done() <-chan struct{}
 	HostnameService() HostnameServiceClient
-	TransferHostnames(ctx context.Context, hostnames []string, leaseID mtypes.LeaseID) error
+	TransferHostname(ctx context.Context, leaseID mtypes.LeaseID, hostname string, serviceName string, externalPort uint32) error
 }
 
 // NewService returns new Service instance
@@ -77,21 +76,24 @@ func NewService(ctx context.Context, session session.Session, bus pubsub.Bus, cl
 		return nil, err
 	}
 
+	// TODO - this should be reviewed, and probably just needs to query CRDs. Not ingress
 	allHostnames, err := client.AllHostnames(ctx)
 	if err != nil {
 		sub.Close()
 		return nil, err
 	}
-	activeHostnames := make(map[string]dtypes.DeploymentID, len(allHostnames))
+	activeHostnames := make(map[string]mtypes.LeaseID, len(allHostnames))
 	for _, v := range allHostnames {
-		deploymentID := v.ID.DeploymentID()
 		for _, hostname := range v.Hostnames {
 			// TODO - filter out generated hostnames here
-			activeHostnames[hostname] = deploymentID
-			log.Debug("found existing hostname", "hostname", hostname, "deployment", deploymentID)
+			activeHostnames[hostname] = v.ID
+			log.Debug("found existing hostname", "hostname", hostname, "id", v.ID)
 		}
 	}
-	hostnames := newHostnameService(ctx, cfg, activeHostnames)
+	hostnames, err := newHostnameService(ctx, cfg, activeHostnames)
+	if err != nil {
+		return nil, err
+	}
 
 	s := &service{
 		session:   session,
@@ -220,9 +222,9 @@ func (s *service) HostnameService() HostnameServiceClient {
 	return s.hostnames
 }
 
-func (s *service) TransferHostnames(ctx context.Context, hostnames []string, leaseID mtypes.LeaseID) error {
+func (s *service) TransferHostname(ctx context.Context, leaseID mtypes.LeaseID, hostname string, serviceName string, externalPort uint32) error {
 	// TODO - shove this into a retry loop, otherwise if it fails the state gets inconsistent
-	return s.client.DeclareHostnames(ctx, leaseID, hostnames)
+	return s.client.DeclareHostname(ctx, leaseID, hostname, serviceName, externalPort)
 }
 
 func (s *service) Status(ctx context.Context) (*ctypes.Status, error) {

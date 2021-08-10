@@ -17,7 +17,6 @@ import (
 	"path"
 	"strconv"
 
-
 	kubeErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/watch"
 
@@ -299,53 +298,49 @@ func (c *client) TeardownLease(ctx context.Context, lid mtypes.LeaseID) error {
 }
 
 
-func (c *client) DeclareHostnames(ctx context.Context, lID mtypes.LeaseID, hosts []string) error {
+func (c *client) DeclareHostname(ctx context.Context, lID mtypes.LeaseID, host string, serviceName string, externalPort uint32) error {
 	// Label each entry with the standard labels
 	labels := make(map[string]string)
 	appendLeaseLabels(lID, labels)
 
-	for _, host := range hosts {
-		foundEntry, err := c.ac.AkashV1().ProviderHosts(c.ns).Get(ctx, host, metav1.GetOptions{})
-		exists := true
-		resourceVersion := foundEntry.ObjectMeta.ResourceVersion
-		if err != nil {
-			if kubeErrors.IsNotFound(err) {
-				exists = false
-			} else {
-				return err
-			}
-		}
-
-		// TODO - probably need to put in the Group sequence & order sequence number here as well
-		obj := akashtypes.ProviderHost{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: host, // Name is always the hostname, to prevent duplicates
-				Labels: labels,
-				ResourceVersion: resourceVersion,
-			},
-			Spec:       akashtypes.ProviderHostSpec{
-				Hostname:    host,
-				Owner:       lID.GetOwner(),
-				Dseq:        lID.GetDSeq(),
-				Oseq: 		 lID.GetOSeq(),
-				Gseq:        lID.GetGSeq(),
-				Provider: 	lID.GetProvider(),
-			},
-			Status:     akashtypes.ProviderHostStatus{},
-		}
-
-		// Create or update the entry
-		if exists {
-			_, err = c.ac.AkashV1().ProviderHosts(c.ns).Update(ctx, &obj, metav1.UpdateOptions{})
+	foundEntry, err := c.ac.AkashV1().ProviderHosts(c.ns).Get(ctx, host, metav1.GetOptions{})
+	exists := true
+	resourceVersion := foundEntry.ObjectMeta.ResourceVersion
+	if err != nil {
+		if kubeErrors.IsNotFound(err) {
+			exists = false
 		} else {
-			_, err = c.ac.AkashV1().ProviderHosts(c.ns).Create(ctx, &obj, metav1.CreateOptions{})
-		}
-		if err != nil {
 			return err
 		}
 	}
 
-	return nil
+	obj := akashtypes.ProviderHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: host, // Name is always the hostname, to prevent duplicates
+			Labels: labels,
+			ResourceVersion: resourceVersion,
+		},
+		Spec:       akashtypes.ProviderHostSpec{
+			Hostname:    host,
+			Owner:       lID.GetOwner(),
+			Dseq:        lID.GetDSeq(),
+			Oseq: 		 lID.GetOSeq(),
+			Gseq:        lID.GetGSeq(),
+			Provider: 	lID.GetProvider(),
+			ServiceName: serviceName,
+			ExternalPort: externalPort,
+		},
+		Status:     akashtypes.ProviderHostStatus{},
+	}
+
+	c.log.Info("declaring hostname", "lease", lID, "service-name", serviceName, "external-port", externalPort)
+	// Create or update the entry
+	if exists {
+		_, err = c.ac.AkashV1().ProviderHosts(c.ns).Update(ctx, &obj, metav1.UpdateOptions{})
+	} else {
+		_, err = c.ac.AkashV1().ProviderHosts(c.ns).Create(ctx, &obj, metav1.CreateOptions{})
+	}
+	return err
 }
 
 func kubeSelectorForLease(dst *strings.Builder, lID mtypes.LeaseID) {
@@ -499,6 +494,16 @@ func (c *client) LeaseStatus(ctx context.Context, lid mtypes.LeaseID) (*ctypes.L
 	if err != nil {
 		return nil, err
 	}
+	labelSelector := &strings.Builder{}
+	kubeSelectorForLease(labelSelector, lid)
+	// TODO - paginate?
+	phResult, err := c.ac.AkashV1().ProviderHosts(c.ns).List(ctx, metav1.ListOptions{
+		LabelSelector:        labelSelector.String(),
+	})
+
+	if err != nil {
+		return nil, err
+	}
 
 	serviceStatus := make(map[string]*ctypes.ServiceStatus, len(deployments))
 	forwardedPorts := make(map[string][]ctypes.ForwardedPortStatus, len(deployments))
@@ -514,10 +519,15 @@ func (c *client) LeaseStatus(ctx context.Context, lid mtypes.LeaseID) (*ctypes.L
 			AvailableReplicas:  deployment.Status.AvailableReplicas,
 		}
 		serviceStatus[deployment.Name] = status
-
-		// TODO - fill in URIs for each entry by querying the CRDs
 	}
 
+	for _, ph := range phResult.Items {
+		for _, serviceStatus := range serviceStatus {
+			if ph.Spec.ServiceName == serviceStatus.Name {
+				serviceStatus.URIs = append(serviceStatus.URIs, ph.Spec.Hostname)
+			}
+		}
+	}
 
 	ingress, err := c.kc.NetworkingV1().Ingresses(lidNS(lid)).List(ctx, metav1.ListOptions{})
 	label := metricsutils.SuccessLabel
@@ -1005,6 +1015,8 @@ type hostnameResourceEvent struct {
 	oseq uint32
 	gseq uint32
 	provider sdktypes.Address
+	serviceName string
+	externalPort uint32
 }
 
 func (ev hostnameResourceEvent) GetLeaseID() mtypes.LeaseID {
@@ -1025,31 +1037,12 @@ func (ev hostnameResourceEvent) GetEventType() cluster.ProviderResourceEvent {
 	return ev.eventType
 }
 
-func (c *client) LeaseHostnames(ctx context.Context, lID mtypes.LeaseID) ([]string, error) {
-	// TODO - I think this should just query the CRDs ?
-	ns := lidNS(lID)
+func (ev hostnameResourceEvent) GetServiceName() string {
+	return ev.serviceName
+}
 
-	pager := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
-		return c.kc.NetworkingV1().Ingresses(ns).List(ctx, opts)
-	})
-
-	listOptions := metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("%s=true", akashManagedLabelName),
-	}
-	hostnames := make([]string, 0)
-	err := pager.EachListItem(ctx, listOptions, func(obj runtime.Object) error {
-		ingress := obj.(*netv1.Ingress)
-		for _, rule := range ingress.Spec.Rules {
-			hostnames = append(hostnames, rule.Host)
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-	return hostnames, nil
+func (ev hostnameResourceEvent) GetExternalPort() uint32 {
+	return ev.externalPort
 }
 
 func (c *client) ObserveHostnameState(ctx context.Context) (<- chan cluster.HostnameResourceEvent, error) {
@@ -1074,7 +1067,7 @@ func (c *client) ObserveHostnameState(ctx context.Context) (<- chan cluster.Host
 		return nil, err
 	}
 
-	fmt.Printf("Starting watch @ %q\n", lastResourceVersion)
+	c.log.Info("starting hostname watch","resourceVersion", lastResourceVersion)
 	watcher, err := c.ac.AkashV1().ProviderHosts(c.ns).Watch(ctx, metav1.ListOptions{
 		TypeMeta:             metav1.TypeMeta{},
 		LabelSelector:        "",
@@ -1109,6 +1102,8 @@ func (c *client) ObserveHostnameState(ctx context.Context) (<- chan cluster.Host
 			dseq:      v.Spec.Dseq,
 			owner:     ownerAddr,
 			provider: providerAddr,
+			serviceName: v.Spec.ServiceName,
+			externalPort: v.Spec.ExternalPort,
 		}
 		evData[i] = ev
 	}
@@ -1149,6 +1144,8 @@ func (c *client) ObserveHostnameState(ctx context.Context) (<- chan cluster.Host
 					gseq: ph.Spec.Gseq,
 					owner:     ownerAddr,
 					provider: providerAddr,
+					serviceName: ph.Spec.ServiceName,
+					externalPort: ph.Spec.ExternalPort,
 				}
 				switch result.Type {
 
@@ -1418,7 +1415,6 @@ func (c *client) AllHostnames(ctx context.Context) ([]cluster.ActiveHostname, er
 		}
 
 		leaseID := mtypes.LeaseID{
-
 			Owner:    owner,
 			DSeq:     dseq,
 			GSeq:     uint32(gseq),

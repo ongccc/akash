@@ -368,6 +368,8 @@ type ProviderHostSpec struct {
 	Dseq uint64 `json:"dseq"`
 	Gseq uint32 `json:"gseq"`
 	Oseq uint32 `json:"oseq"`
+	ServiceName string `json:"service_name"`
+	ExternalPort uint32 `json:"external_port"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

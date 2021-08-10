@@ -21,6 +21,10 @@ spec:
             spec:
               type: object
               properties:
+                service_name:
+                  type: string
+                external_port:
+                  type: integer
                 hostname:
                   type: string
                 owner:

@@ -33,10 +33,8 @@ var (
 	ErrExecCommandExecutionFailed  = fmt.Errorf("%w: command execution failed", ErrExec)
 	ErrExecCommandDoesNotExist     = fmt.Errorf("%w: command could not be executed because it does not exist", ErrExec)
 	ErrExecDeploymentNotYetRunning = fmt.Errorf("%w: deployment is not yet active", ErrExec)
-	ErrExecMultiplePods            = fmt.Errorf("%w: cannot execute without specifying a pod explicitly", ErrExec)
 	ErrExecPodIndexOutOfRange      = fmt.Errorf("%w: pod index out of range", ErrExec)
 	errNotImplemented = errors.New("not implemented")
-	ErrClearHostnameNoMatches        = errors.New("clearing hostname, no matches")
 )
 
 type ProviderResourceEvent string
@@ -47,16 +45,11 @@ const (
 )
 
 type HostnameResourceEvent interface {
-	/**
-	GetOwner() sdktypes.Address
-	GetDseq() uint64
-	GetOseq() uint32
-	GetGseq() uint32
-	GetProvider() sdktypes.Address
-	 */
 	GetLeaseID() mtypes.LeaseID
 	GetEventType() ProviderResourceEvent
 	GetHostname() string
+	GetServiceName() string
+	GetExternalPort() uint32
 }
 
 type ReadClient interface {
@@ -64,13 +57,12 @@ type ReadClient interface {
 	LeaseEvents(context.Context, mtypes.LeaseID, string, bool) (ctypes.EventsWatcher, error)
 	LeaseLogs(context.Context, mtypes.LeaseID, string, bool, *int64) ([]*ctypes.ServiceLog, error)
 	ServiceStatus(context.Context, mtypes.LeaseID, string) (*ctypes.ServiceStatus, error)
-	LeaseHostnames(context.Context, mtypes.LeaseID) ([]string, error)
+
 	AllHostnames(context.Context) ([]ActiveHostname, error)
 	GetManifestGroup(context.Context, mtypes.LeaseID) (bool, akashv1.ManifestGroup, error)
 
 	// TODO - probably move some of this to a separate interface ??
 	ObserveHostnameState(ctx context.Context) (<- chan HostnameResourceEvent, error)
-	//GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.Deployment, error)
 	GetHostnameDeploymentConnections(ctx context.Context) ([]LeaseIdHostnameConnection, error)
 }
 
@@ -98,7 +90,7 @@ type Client interface {
 	RemoveHostnameFromDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, allowMissing bool) error
 
 	// Declare that a given deployment should be connected to a given hostname
-	DeclareHostnames(ctx context.Context, lID mtypes.LeaseID, hosts []string) error
+	DeclareHostname(ctx context.Context, lID mtypes.LeaseID, host string, serviceName string, externalPort uint32) error
 	// Purge any hostnames associated with a given deployment
 	PurgeDeclaredHostnames(ctx context.Context, lID mtypes.LeaseID) error
 }
@@ -203,7 +195,7 @@ func (c *nullClient) ConnectHostnameToDeployment(ctx context.Context, hostname s
 }
 
 // Declare that a given deployment should be connected to a given hostname
-func (c *nullClient) DeclareHostnames(ctx context.Context, lID mtypes.LeaseID, hosts []string) error {
+func (c *nullClient) DeclareHostname(ctx context.Context, lID mtypes.LeaseID, host string, serviceName string, externalPort uint32) error {
 	return errNotImplemented
 }
 // Purge any hostnames associated with a given deployment
@@ -361,10 +353,6 @@ func (c *nullClient) Inventory(context.Context) ([]ctypes.Node, error) {
 
 func (c *nullClient) Exec(context.Context, mtypes.LeaseID, string, uint, []string, io.Reader, io.Writer, io.Writer, bool, remotecommand.TerminalSizeQueue) (ctypes.ExecResult, error) {
 	return nil, errNotImplemented
-}
-
-func (c *nullClient) LeaseHostnames(context.Context, mtypes.LeaseID) ([]string, error) {
-	return nil, nil
 }
 
 func (c *nullClient) GetManifestGroup(context.Context, mtypes.LeaseID) (bool, akashv1.ManifestGroup, error) {

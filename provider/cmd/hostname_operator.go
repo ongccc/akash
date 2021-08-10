@@ -2,15 +2,11 @@ package cmd
 
 import (
 	"context"
-	"github.com/ovrclk/akash/manifest"
-	akashtypes "github.com/ovrclk/akash/pkg/apis/akash.network/v1"
 	"github.com/ovrclk/akash/provider/cluster"
 	clusterClient "github.com/ovrclk/akash/provider/cluster/kube"
-	"github.com/ovrclk/akash/provider/cluster/util"
 	mtypes "github.com/ovrclk/akash/x/market/types"
 	"github.com/spf13/cobra"
 	"github.com/tendermint/tendermint/libs/log"
-	"strings"
 )
 
 
@@ -116,66 +112,12 @@ func (op *hostnameOperator) applyDeleteEvent(ctx context.Context, ev cluster.Hos
 
 func (op *hostnameOperator) applyAddOrUpdateEvent(ctx context.Context, ev cluster.HostnameResourceEvent) error {
 	leaseID := ev.GetLeaseID()
-	// Fetch manifest group for the deployment
-	found, mgroup, err := op.client.GetManifestGroup(ctx, leaseID)
-	if err != nil {
-		return err
-	}
-
-	if !found {
-		panic("no such manifest found") // TODO - return an error
-	}
-
-	var selectedService akashtypes.ManifestService
-	for _, service := range mgroup.Services {
-		autoIngressHost := util.IngressHost(leaseID, service.Name)
-		op.log.Debug("checking for match", "candidate", autoIngressHost)
-
-		// TODO - check that this ends with c.settings.DeploymentIngressDomain
-		if strings.HasPrefix(ev.GetHostname(), autoIngressHost + ".") {
-			selectedService = service
-		} else {
-			for _, serviceExpose := range service.Expose {
-				for _, host := range serviceExpose.Hosts {
-					op.log.Debug("checking for match", "candidate", host)
-					if host == ev.GetHostname() {
-						selectedService = service
-					}
-				}
-			}
-		}
-		if len(selectedService.Name) != 0 {
-			break
-		}
-	}
-	// TODO - check to see if none matched
-	if len(selectedService.Name) == 0{
-		panic("no service selected")
-	}
-
-	externalPort := int32(-1)
-	for _, expose := range selectedService.Expose {
-		serviceExpose := manifest.ServiceExpose{
-			Port:         expose.Port,
-			ExternalPort: expose.ExternalPort,
-			Global:       expose.Global,
-			Proto: manifest.ServiceProtocol(expose.Proto),
-		}
-		if !util.ShouldBeIngress(serviceExpose){
-			continue
-		}
-		externalPort = int32(expose.ExternalPort)
-		break
-	}
-	if externalPort == -1 {
-		panic("no external port selected")
-	}
 
 	op.log.Debug("connecting",
 		"hostname", ev.GetHostname(),
 		"lease", leaseID,
-		"service", selectedService.Name,
-		"externalPort", externalPort)
+		"service", ev.GetServiceName(),
+		"externalPort", ev.GetExternalPort())
 	entry, exists := op.hostnames[ev.GetHostname()]
 
 	isSameLease := false
@@ -185,21 +127,21 @@ func (op *hostnameOperator) applyAddOrUpdateEvent(ctx context.Context, ev cluste
 		isSameLease = true
 	}
 
+	var err error
 	if isSameLease {
 		// Check to see if port or service name is different
-		changed := !exists || entry.presentExternalPort != externalPort || entry.presentServiceName != selectedService.Name
+		changed := !exists || uint32(entry.presentExternalPort) != ev.GetExternalPort() || entry.presentServiceName != ev.GetServiceName()
 		if changed {
 			op.log.Debug("Updating ingress")
 			// Update or create the existing ingress
-			err = op.client.ConnectHostnameToDeployment(ctx, ev.GetHostname(), leaseID, selectedService.Name, externalPort)
+			err = op.client.ConnectHostnameToDeployment(ctx, ev.GetHostname(), leaseID, ev.GetServiceName(), int32(ev.GetExternalPort()))
 		}
 	} else {
 		op.log.Debug("Swapping ingress to new deployment")
-		// TODO - Delete the ingress in one namespace and recreate it in the correct one
-
+		//  Delete the ingress in one namespace and recreate it in the correct one
 		err = op.client.RemoveHostnameFromDeployment(ctx, ev.GetHostname(), entry.presentLease, false)
 		if err == nil {
-			err = op.client.ConnectHostnameToDeployment(ctx, ev.GetHostname(), leaseID, selectedService.Name, externalPort)
+			err = op.client.ConnectHostnameToDeployment(ctx, ev.GetHostname(), leaseID, ev.GetServiceName(), int32(ev.GetExternalPort()))
 		}
 	}
 

@@ -5,21 +5,51 @@ import (
 	"fmt"
 	lifecycle "github.com/boz/go-lifecycle"
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
-	dtypes "github.com/ovrclk/akash/x/deployment/types"
+
+	mtypes "github.com/ovrclk/akash/x/market/types"
 	"github.com/pkg/errors"
 	"strings"
 	"sync"
 )
 
 type HostnameServiceClient interface {
-	ReserveHostnames(hostnames []string, dID dtypes.DeploymentID) ReservationResult
-	ReleaseHostnames(dID dtypes.DeploymentID)
+	ReserveHostnames(hostnames []string, leaseID mtypes.LeaseID) ReservationResult
+	ReleaseHostnames(leaseID mtypes.LeaseID) error
 	CanReserveHostnames(hostnames []string, ownerAddr sdktypes.Address) <-chan error
-	PrepareHostnamesForTransfer(hostnames []string, dID dtypes.DeploymentID) <- chan error
+	PrepareHostnamesForTransfer(hostnames []string, leaseID mtypes.LeaseID) <- chan error
+}
+
+/**
+This type exists to identify the target of a reservation. The lease ID type is not used directly because
+there is no need to consider order ID or provider ID for the purposes oft this
+ */
+type hostnameID struct {
+	owner sdktypes.Address
+	dseq uint64
+	gseq uint32
+}
+
+func (hID hostnameID) Equals(other hostnameID) bool {
+	return hID.gseq == other.gseq &&
+		hID.dseq == other.dseq &&
+		hID.owner.Equals(other.owner)
+}
+
+func hostnameIDFromLeaseID(lID mtypes.LeaseID) (hostnameID, error) {
+	ownerAddr, err := lID.DeploymentID().GetOwnerAddress()
+	if err != nil {
+		return hostnameID{}, err
+	}
+
+	return hostnameID{
+		owner: ownerAddr,
+		dseq:  lID.GetDSeq(),
+		gseq:  lID.GetGSeq(),
+	}, nil
 }
 
 type SimpleHostnames struct {
-	Hostnames map[string]dtypes.DeploymentID
+	Hostnames map[string]hostnameID
 	lock      sync.Mutex
 } /* Used in test code */
 
@@ -39,30 +69,25 @@ func (rr ReservationResult) Wait(wait <-chan struct{}) ([]string, error) {
 	}
 }
 
-func (sh *SimpleHostnames) PrepareHostnameForTransfer(hostnames []string, dID dtypes.DeploymentID) <- chan error{
+func (sh *SimpleHostnames) PrepareHostnameForTransfer(hostnames []string, leaseID mtypes.LeaseID) <- chan error{
 	sh.lock.Lock()
 	defer sh.lock.Unlock()
 	errCh := make(chan error, 1)
-	prepareHostnamesImpl(sh.Hostnames, hostnames, dID, errCh)
+	hID, err := hostnameIDFromLeaseID(leaseID)
+	if err != nil {
+		errCh <- err
+	} else {
+		prepareHostnamesImpl(sh.Hostnames, hostnames, hID, errCh)
+	}
 	return errCh
 }
 
-func prepareHostnamesImpl(store map[string]dtypes.DeploymentID, hostnames []string, dID dtypes.DeploymentID, errCh chan <- error){
-	ownerAddr, err := dID.GetOwnerAddress()
-	if err != nil {
-		errCh <- err
-		return
-	}
+func prepareHostnamesImpl(store map[string]hostnameID, hostnames []string, hID hostnameID, errCh chan <- error){
 	toChange := make([]string, 0, len(hostnames))
 	for _, hostname := range hostnames {
-		existingDID, ok := store[hostname]
+		existingID, ok := store[hostname]
 		if ok {
-			existingOwnerAddr, err := existingDID.GetOwnerAddress()
-			if err != nil {
-				errCh <- err
-				return
-			}
-			if existingOwnerAddr.Equals(ownerAddr) {
+			if existingID.owner.Equals(hID.owner) {
 				toChange = append(toChange, hostname)
 			} else {
 				errCh <- fmt.Errorf("%w: host %q in use", ErrHostnameNotAllowed, hostname)
@@ -73,12 +98,12 @@ func prepareHostnamesImpl(store map[string]dtypes.DeploymentID, hostnames []stri
 
 	// Swap over each hostname
 	for _, hostname := range toChange {
-		store[hostname] = dID
+		store[hostname] = hID
 	}
 	close(errCh)
 }
 
-func (sh *SimpleHostnames) ReserveHostnames(hostnames []string, dID dtypes.DeploymentID) ReservationResult {
+func (sh *SimpleHostnames) ReserveHostnames(hostnames []string, leaseID mtypes.LeaseID) ReservationResult {
 	sh.lock.Lock()
 	defer sh.lock.Unlock()
 	errCh := make(chan error, 1)
@@ -88,37 +113,32 @@ func (sh *SimpleHostnames) ReserveHostnames(hostnames []string, dID dtypes.Deplo
 		ChErr:               errCh,
 		ChWithheldHostnames: resultCh,
 	}
-	reserveHostnamesImpl(sh.Hostnames, hostnames, dID, errCh, resultCh)
+
+	hID, err := hostnameIDFromLeaseID(leaseID)
+	if err != nil {
+		errCh <- err
+	} else {
+		reserveHostnamesImpl(sh.Hostnames, hostnames, hID, errCh, resultCh)
+	}
 	return result
 }
 
-func reserveHostnamesImpl(store map[string]dtypes.DeploymentID, hostnames []string, dID dtypes.DeploymentID, ch chan<- error, resultCh chan<- []string) {
-	reservingHostnameAddr, err := dID.GetOwnerAddress()
-	if err != nil {
-		ch <- err
-		return
-	}
-
+func reserveHostnamesImpl(store map[string]hostnameID, hostnames []string, hID hostnameID, ch chan<- error, resultCh chan<- []string) {
 	withheldHostnamesMap := make(map[string]struct{})
 	withheldHostnames := make([]string, 0)
 	for _, hostname := range hostnames {
 		// Check if in use
-		usedByDid, inUse := store[hostname]
+		existingID, inUse := store[hostname]
 		if inUse {
 			// Check to see if the same address already is using this hostname
-			existingOwnerAddr, err := usedByDid.GetOwnerAddress()
-			if err != nil {
-				ch <- err
-				return
-			}
-			if !existingOwnerAddr.Equals(reservingHostnameAddr) {
+			if ! existingID.owner.Equals(hID.owner)  {
 				// The owner is not the same, this can't be done
 				ch <- fmt.Errorf("%w: host %q in use", ErrHostnameNotAllowed, hostname)
 				return
 			}
 
 			// Check for a deployment replacing another one
-			if dID.DSeq != usedByDid.DSeq {
+			if existingID.Equals(hID) {
 				// Record that the hostname is being replaced
 				withheldHostnames = append(withheldHostnames, hostname)
 				withheldHostnamesMap[hostname] = struct{}{}
@@ -130,7 +150,7 @@ func reserveHostnamesImpl(store map[string]dtypes.DeploymentID, hostnames []stri
 	for _, hostname := range hostnames {
 		_, withheld := withheldHostnamesMap[hostname]
 		if !withheld {
-			store[hostname] = dID
+			store[hostname] = hID
 		}
 
 	}
@@ -147,18 +167,12 @@ func (sh *SimpleHostnames) CanReserveHostnames(hostnames []string, ownerAddr sdk
 	return ch
 }
 
-func canReserveHostnamesImpl(store map[string]dtypes.DeploymentID, hostnames []string, ownerAddr sdktypes.Address, chErr chan<- error) {
+func canReserveHostnamesImpl(store map[string]hostnameID, hostnames []string, ownerAddr sdktypes.Address, chErr chan<- error) {
 	for _, hostname := range hostnames {
-		usedByDid, inUse := store[hostname]
+		existingID, inUse := store[hostname]
 
 		if inUse {
-			existingOwnerAddr, err := usedByDid.GetOwnerAddress()
-			if err != nil {
-				chErr <- err
-				return
-
-			}
-			if !existingOwnerAddr.Equals(ownerAddr) {
+			if !existingID.owner.Equals(ownerAddr) {
 				chErr <- fmt.Errorf("%w: host %q in use", ErrHostnameNotAllowed, hostname)
 				return
 			}
@@ -168,17 +182,23 @@ func canReserveHostnamesImpl(store map[string]dtypes.DeploymentID, hostnames []s
 	chErr <- nil
 }
 
-func (sh *SimpleHostnames) ReleaseHostnames(dID dtypes.DeploymentID) {
+func (sh *SimpleHostnames) ReleaseHostnames(leaseID mtypes.LeaseID) error {
 	sh.lock.Lock()
 	defer sh.lock.Unlock()
 
-	releaseHostnamesImpl(sh.Hostnames, dID)
+	hID, err := hostnameIDFromLeaseID(leaseID)
+	if err != nil {
+		return err
+	}
+
+	releaseHostnamesImpl(sh.Hostnames, hID)
+	return nil
 }
 
-func releaseHostnamesImpl(store map[string]dtypes.DeploymentID, dID dtypes.DeploymentID) {
+func releaseHostnamesImpl(store map[string]hostnameID, hID hostnameID) {
 	var toDelete []string
-	for hostname, existingDeployment := range store {
-		if existingDeployment.Equals(dID) {
+	for hostname, existing := range store {
+		if existing.Equals(hID) {
 			toDelete = append(toDelete, hostname)
 		}
 	}
@@ -192,7 +212,7 @@ type reserveRequest struct {
 	chErr               chan<- error
 	chReplacedHostnames chan<- []string
 	hostnames           []string
-	deploymentID        dtypes.DeploymentID
+	hID        hostnameID
 }
 
 type canReserveRequest struct {
@@ -203,17 +223,17 @@ type canReserveRequest struct {
 
 type prepareTransferRequest struct {
 	hostnames []string
-	deploymentID        dtypes.DeploymentID
+	hID        hostnameID
 	chErr chan<- error
 }
 
 type hostnameService struct {
-	inUse map[string]dtypes.DeploymentID
+	inUse map[string]hostnameID
 
 	requests   chan reserveRequest
 	canRequest chan canReserveRequest
 	prepareRequest chan prepareTransferRequest
-	releases   chan dtypes.DeploymentID
+	releases   chan hostnameID
 	lc         lifecycle.Lifecycle
 
 	blockedHostnames []string
@@ -223,7 +243,7 @@ type hostnameService struct {
 
 const HostnameSeparator = '.'
 
-func newHostnameService(ctx context.Context, cfg Config, initialData map[string]dtypes.DeploymentID) *hostnameService {
+func newHostnameService(ctx context.Context, cfg Config, initialData map[string]mtypes.LeaseID) (*hostnameService, error) {
 	blockedHostnames := make([]string, 0)
 	blockedDomains := make([]string, 0)
 	for _, name := range cfg.BlockedHostnames {
@@ -236,23 +256,27 @@ func newHostnameService(ctx context.Context, cfg Config, initialData map[string]
 	}
 
 	hs := &hostnameService{
-		inUse:            make(map[string]dtypes.DeploymentID, len(initialData)),
+		inUse:            make(map[string]hostnameID, len(initialData)),
 		blockedHostnames: blockedHostnames,
 		blockedDomains:   blockedDomains,
 		requests:         make(chan reserveRequest),
 		canRequest:       make(chan canReserveRequest),
-		releases:         make(chan dtypes.DeploymentID),
+		releases:         make(chan hostnameID),
 		lc:               lifecycle.New(),
 		prepareRequest: make(chan prepareTransferRequest),
 	}
 	for k, v := range initialData {
-		hs.inUse[k] = v
+		hID, err := hostnameIDFromLeaseID(v)
+		if err != nil {
+			return nil, err
+		}
+		hs.inUse[k] = hID
 	}
 
 	go hs.lc.WatchContext(ctx)
 	go hs.run()
 
-	return hs
+	return hs, nil
 }
 
 func (hs *hostnameService) run() {
@@ -270,10 +294,10 @@ loop:
 			hs.doRequest(rr)
 		case crr := <-hs.canRequest:
 			canReserveHostnamesImpl(hs.inUse, crr.hostnames, crr.ownerAddr, crr.result)
-		case dID := <-hs.releases:
-			releaseHostnamesImpl(hs.inUse, dID)
+		case v := <-hs.releases:
+			releaseHostnamesImpl(hs.inUse, v)
 		case request := <-hs.prepareRequest:
-			prepareHostnamesImpl(hs.inUse, request.hostnames, request.deploymentID, request.chErr)
+			prepareHostnamesImpl(hs.inUse, request.hostnames, request.hID, request.chErr)
 
 		}
 	}
@@ -282,12 +306,18 @@ loop:
 
 var ErrHostnameNotAllowed = errors.New("hostname not allowed")
 
-func (hs *hostnameService) PrepareHostnamesForTransfer(hostnames []string, dID dtypes.DeploymentID) <- chan error {
+func (hs *hostnameService) PrepareHostnamesForTransfer(hostnames []string, leaseID mtypes.LeaseID) <- chan error {
 	chErr := make(chan error, 1)
+
+	hID, err := hostnameIDFromLeaseID(leaseID)
+	if err != nil {
+		chErr <- err
+		return chErr
+	}
 
 	v:= prepareTransferRequest{
 		hostnames: hostnames,
-		deploymentID: dID,
+		hID: hID,
 		chErr:     chErr,
 	}
 	select {
@@ -325,30 +355,36 @@ func (hs *hostnameService) doRequest(rr reserveRequest) {
 		}
 	}
 
-	reserveHostnamesImpl(hs.inUse, rr.hostnames, rr.deploymentID, rr.chErr, rr.chReplacedHostnames)
+	reserveHostnamesImpl(hs.inUse, rr.hostnames, rr.hID, rr.chErr, rr.chReplacedHostnames)
 }
 
-func (hs *hostnameService) ReserveHostnames(hostnames []string, dID dtypes.DeploymentID) ReservationResult {
+func (hs *hostnameService) ReserveHostnames(hostnames []string, leaseID mtypes.LeaseID) ReservationResult {
 	lowercaseHostnames := make([]string, len(hostnames))
 	for i, hostname := range hostnames {
 		lowercaseHostnames[i] = strings.ToLower(hostname)
 	}
 
-	chErr := make(chan error, 1)                            // Buffer of one so service does not block
+	chErr := make(chan error, 1)                  // Buffer of one so service does not block
 	chWithheldHostnames := make(chan []string, 1) // Buffer of one so service does not block
 
-	request := reserveRequest{
-		chErr:               chErr,
-		chReplacedHostnames: chWithheldHostnames,
-		hostnames:           lowercaseHostnames,
-		deploymentID:        dID,
-	}
+	hID, err := hostnameIDFromLeaseID(leaseID)
 
-	select {
-	case hs.requests <- request:
+	if err != nil {
+		chErr <- err
+	} else {
+		request := reserveRequest{
+			chErr:               chErr,
+			chReplacedHostnames: chWithheldHostnames,
+			hostnames:           lowercaseHostnames,
+			hID:                 hID,
+		}
 
-	case <-hs.lc.ShuttingDown():
-		chErr <- ErrNotRunning
+		select {
+		case hs.requests <- request:
+
+		case <-hs.lc.ShuttingDown():
+			chErr <- ErrNotRunning
+		}
 	}
 
 	return ReservationResult{
@@ -357,12 +393,17 @@ func (hs *hostnameService) ReserveHostnames(hostnames []string, dID dtypes.Deplo
 	}
 }
 
-func (hs *hostnameService) ReleaseHostnames(dID dtypes.DeploymentID) {
+func (hs *hostnameService) ReleaseHostnames(leaseID mtypes.LeaseID) error {
+	hID, err := hostnameIDFromLeaseID(leaseID)
+	if err != nil {
+		return err
+	}
 	select {
-	case hs.releases <- dID:
+	case hs.releases <- hID:
 	case <-hs.lc.ShuttingDown():
 		// service is shutting down, so release doesn't matter
 	}
+	return nil
 }
 
 func (hs *hostnameService) CanReserveHostnames(hostnames []string, ownerAddr sdktypes.Address) <-chan error {

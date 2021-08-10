@@ -373,13 +373,8 @@ func migrateHandler(log log.Logger, hostnameService cluster.HostnameServiceClien
 		owner := requestOwner(req)
 
 		// Make sure this hostname can be taken
-		dID := dtypes.DeploymentID{
-			Owner: owner.String(),
-			DSeq:  body.DestinationDSeq,
-		}
 
 		//  make sure destination deployment actually exists
-		// TODO - should this check actually be checking for Lease ID here?
 		found, activeLease, err := clusterService.FindActiveLease(req.Context(), owner, body.DestinationDSeq, body.DestinationGSeq)
 		if err != nil {
 			log.Error("failed checking if destination deployment exists", "err", err)
@@ -417,11 +412,10 @@ func migrateHandler(log log.Logger, hostnameService cluster.HostnameServiceClien
 
 		// Tell the hostname service to move the hostnames to the new deployment, unconditionally
 		log.Debug("preparing migration of hostnames", "cnt", len(body.HostnamesToMigrate))
-		// TODO - hostname service should work by owner, dseq, gseq,
 		// TODO - the code below can wind up being a no-op because it is possible that destinatino is where
 		// the hostname already lives. The PrepareHostnamesForTransfer function should check for this
 		// and return an error
-		errCh := hostnameService.PrepareHostnamesForTransfer(body.HostnamesToMigrate, dID)
+		errCh := hostnameService.PrepareHostnamesForTransfer(body.HostnamesToMigrate, leaseID)
 
 		select {
 		case err = <-errCh:
@@ -446,7 +440,8 @@ func migrateHandler(log log.Logger, hostnameService cluster.HostnameServiceClien
 		log.Debug("transferring hostnames", "cnt", len(body.HostnamesToMigrate))
 
 		// Migrate the hostnames
-		err = clusterService.TransferHostnames(req.Context(), body.HostnamesToMigrate, leaseID)
+		//err = clusterService.TransferHostnames(req.Context(), body.HostnamesToMigrate, leaseID)
+		err = nil
 		if err != nil {
 			log.Error("failed starting transfer of hostnames", "err", err)
 			http.Error(rw, err.Error(), http.StatusInternalServerError)

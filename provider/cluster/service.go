@@ -84,11 +84,9 @@ func NewService(ctx context.Context, session session.Session, bus pubsub.Bus, cl
 	}
 	activeHostnames := make(map[string]mtypes.LeaseID, len(allHostnames))
 	for _, v := range allHostnames {
-		for _, hostname := range v.Hostnames {
-			// TODO - filter out generated hostnames here
-			activeHostnames[hostname] = v.ID
-			log.Debug("found existing hostname", "hostname", hostname, "id", v.ID)
-		}
+		// TODO - filter out generated hostnames here
+		activeHostnames[v.Hostname] = v.ID
+		log.Debug("found existing hostname", "hostname", v.Hostname, "id", v.ID)
 	}
 	hostnames, err := newHostnameService(ctx, cfg, activeHostnames)
 	if err != nil {
@@ -109,6 +107,7 @@ func NewService(ctx context.Context, session session.Session, bus pubsub.Bus, cl
 
 		log: log,
 		lc:  lc,
+		config: cfg,
 	}
 
 	go s.lc.WatchContext(ctx)
@@ -134,6 +133,8 @@ type service struct {
 
 	log log.Logger
 	lc  lifecycle.Lifecycle
+
+	config Config
 }
 
 type checkDeploymentExistsRequest struct {

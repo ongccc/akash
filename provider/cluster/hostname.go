@@ -138,7 +138,7 @@ func reserveHostnamesImpl(store map[string]hostnameID, hostnames []string, hID h
 			}
 
 			// Check for a deployment replacing another one
-			if existingID.Equals(hID) {
+			if ! existingID.Equals(hID) {
 				// Record that the hostname is being replaced
 				withheldHostnames = append(withheldHostnames, hostname)
 				withheldHostnamesMap[hostname] = struct{}{}

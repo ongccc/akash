@@ -388,19 +388,25 @@ func migrateHandler(log log.Logger, hostnameService cluster.HostnameServiceClien
 			return
 		}
 
+		hostnameToServiceName := make(map[string]string)
+		hostnameToExternalPort := make(map[string]uint32)
+
 		// check that the destination leases can actually use the requested hostnames
 		// for a hostname to be migrated it must be declared
-		hostnamesInManifestGroups := make(map[string]struct{})
+
 		for _, service := range activeLease.Group.Services {
 			for _, expose := range service.Expose {
 				for _, host := range expose.Hosts {
-					hostnamesInManifestGroups[host] = struct{}{}
+					hostnameToServiceName[host] = service.Name
+					hostnameToExternalPort[host] = uint32(expose.ExternalPort)
+
+
 				}
 			}
 		}
 
 		for _, hostname := range body.HostnamesToMigrate {
-			_, inUse := hostnamesInManifestGroups[hostname]
+			_, inUse := hostnameToServiceName[hostname]
 			if !inUse {
 				msg := fmt.Sprintf("the hostname %q is not used by this deployment", hostname)
 				http.Error(rw, msg, http.StatusBadRequest)
@@ -440,12 +446,15 @@ func migrateHandler(log log.Logger, hostnameService cluster.HostnameServiceClien
 		log.Debug("transferring hostnames", "cnt", len(body.HostnamesToMigrate))
 
 		// Migrate the hostnames
-		//err = clusterService.TransferHostnames(req.Context(), body.HostnamesToMigrate, leaseID)
-		err = nil
-		if err != nil {
-			log.Error("failed starting transfer of hostnames", "err", err)
-			http.Error(rw, err.Error(), http.StatusInternalServerError)
-			return
+		for _, hostname := range body.HostnamesToMigrate {
+			serviceName := hostnameToServiceName[hostname]
+			externalPort := hostnameToExternalPort[hostname]
+			err = clusterService.TransferHostname(req.Context(), leaseID, hostname, serviceName, externalPort)
+			if err != nil {
+				log.Error("failed starting transfer of hostnames", "err", err)
+				http.Error(rw, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		rw.WriteHeader(http.StatusOK)

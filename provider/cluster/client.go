@@ -108,7 +108,7 @@ func ErrorIsOkToSendToClient(err error) bool {
 
 type ActiveHostname struct {
 	ID mtypes.LeaseID
-	Hostnames []string
+	Hostname string
 }
 
 type node struct {

@@ -510,6 +510,7 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 	config.BidTimeout = bidTimeout
 	config.ManifestTimeout = manifestTimeout
 
+
 	config.BalanceCheckerCfg = provider.BalanceCheckerConfig{
 		PollingPeriod:           viper.GetDuration(FlagBalanceCheckPeriod),
 		MinimumBalanceThreshold: viper.GetUint64(FlagMinimumBalance),

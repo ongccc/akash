@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	lifecycle "github.com/boz/go-lifecycle"
 	"github.com/ovrclk/akash/manifest"
@@ -13,12 +12,12 @@ import (
 	"time"
 
 	retry "github.com/avast/retry-go"
+	clusterutil "github.com/ovrclk/akash/provider/cluster/util"
 	"github.com/ovrclk/akash/provider/session"
 	"github.com/ovrclk/akash/pubsub"
 	mtypes "github.com/ovrclk/akash/x/market/types"
 	"github.com/tendermint/tendermint/libs/log"
 	"sync"
-	clusterutil "github.com/ovrclk/akash/provider/cluster/util"
 )
 
 type deploymentState string
@@ -55,17 +54,18 @@ type deploymentManager struct {
 	monitor    *deploymentMonitor
 	withdrawal *deploymentWithdrawal
 	wg         sync.WaitGroup
-
 	updatech   chan *manifest.Group
-	forcech chan (chan <- error)
 	teardownch chan struct{}
 
 	log             log.Logger
 	lc              lifecycle.Lifecycle
 	hostnameService HostnameServiceClient
+
+	config Config
 }
 
 func newDeploymentManager(s *service, lease mtypes.LeaseID, mgroup *manifest.Group) *deploymentManager {
+
 	log := s.log.With("cmp", "deployment-manager", "lease", lease, "manifest-group", mgroup.Name)
 
 	dm := &deploymentManager{
@@ -81,7 +81,7 @@ func newDeploymentManager(s *service, lease mtypes.LeaseID, mgroup *manifest.Gro
 		log:               log,
 		lc:                lifecycle.New(),
 		hostnameService:   s.HostnameService(),
-		forcech: make(chan (chan <- error)),
+		config: s.config,
 	}
 
 	go dm.lc.WatchChannel(s.lc.ShuttingDown())
@@ -108,23 +108,6 @@ func (dm *deploymentManager) teardown() error {
 	select {
 	case dm.teardownch <- struct{}{}:
 		return nil
-	case <-dm.lc.ShuttingDown():
-		return ErrNotRunning
-	}
-}
-
-func (dm *deploymentManager) force() error {
-	ch := make(chan error, 1)
-	select {
-	case dm.forcech <- ch:
-
-	case <-dm.lc.ShuttingDown():
-		return ErrNotRunning
-	}
-
-	select {
-	case err := <- ch:
-		return err
 	case <-dm.lc.ShuttingDown():
 		return ErrNotRunning
 	}
@@ -166,19 +149,6 @@ loop:
 
 		case shutdownErr = <-dm.lc.ShutdownRequest():
 			break loop
-
-		case forceResponse := <-dm.forcech:
-			if dm.state == dsDeployComplete {
-				newch := dm.handleUpdate()
-				if newch != nil {
-					runch = newch
-				}
-				forceResponse <- nil
-			} else {
-				// TODO - constant
-				forceResponse <- errors.New("deploy pending")
-			}
-
 
 		case mgroup := <-dm.updatech:
 			dm.mgroup = mgroup
@@ -333,6 +303,8 @@ func (dm *deploymentManager) doDeploy() ([]string, error) {
 	}
 	deploymentCounter.WithLabelValues("reserve-hostnames", "success").Inc()
 
+	dm.log.Info("hostnames withheld", "cnt", len(withheldHostnames))
+
 	// Don't use a context tied to the lifecycle, as we don't want to cancel Kubernetes operations
 	ctx := context.Background()
 
@@ -356,13 +328,9 @@ func (dm *deploymentManager) doDeploy() ([]string, error) {
 				continue
 			}
 
-			// TODO read this value from c.settings.DeploymentIngressStaticHosts somehow
-			deploymentIngressStaticHosts := true
-			// TODO read this value from c.settings.DeploymentIngressDomain somehow
-			deploymentIngressDomain := "localhost"
-			if deploymentIngressStaticHosts {
+			if dm.config.DeploymentIngressStaticHosts {
 				uid := clusterutil.IngressHost(dm.lease, service.Name)
-				host := fmt.Sprintf("%s.%s", uid, deploymentIngressDomain)
+				host := fmt.Sprintf("%s.%s", uid, dm.config.DeploymentIngressDomain)
 				hosts[host] = expose
 				hostToServiceName[host] = service.Name
 			}

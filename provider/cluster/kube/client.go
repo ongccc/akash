@@ -268,17 +268,7 @@ func (c *client) Deploy(ctx context.Context, lid mtypes.LeaseID, group *manifest
 			}
 		}
 
-		/**
-		for expIdx := range service.Expose {
-			expose := service.Expose[expIdx]
-			if !util.ShouldBeIngress(expose) {
-				continue
-			}
-			if err := applyIngress(ctx, c.kc, newIngressBuilder(c.log, c.settings, lid, group, service, &service.Expose[expIdx], holdHostnames)); err != nil {
-				c.log.Error("applying ingress", "err", err, "lease", lid, "service", service.Name, "expose", expose)
-				return err
-			}
-		}**/
+
 	}
 
 	return nil

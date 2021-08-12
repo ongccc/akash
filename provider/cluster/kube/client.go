@@ -650,7 +650,7 @@ func (c *client) ServiceStatus(ctx context.Context, lid mtypes.LeaseID, name str
 		return nil, ErrNoDeploymentForLease
 	}
 
-	hasIngress := false
+	hasHostnames := false
 	// Get manifest definition from CRD
 	c.log.Debug("Pulling manifest from CRD", "lease-ns", lidNS(lid))
 	obj, err := c.ac.AkashV1().Manifests(c.ns).Get(ctx, lidNS(lid), metav1.GetOptions{})
@@ -660,7 +660,7 @@ func (c *client) ServiceStatus(ctx context.Context, lid mtypes.LeaseID, name str
 	}
 
 	found := false
-exposeCheckLoop:
+	exposeCheckLoop:
 	for _, service := range obj.Spec.Group.Services {
 		if service.Name == name {
 			found = true
@@ -679,7 +679,7 @@ exposeCheckLoop:
 					Hosts:        expose.Hosts,
 				}
 				if util.ShouldBeIngress(mse) {
-					hasIngress = true
+					hasHostnames = true
 					break exposeCheckLoop
 				}
 			}
@@ -689,7 +689,7 @@ exposeCheckLoop:
 		return nil, fmt.Errorf("%w: service %q", ErrNoServiceForLease, name)
 	}
 
-	c.log.Debug("service result", "lease-ns", lidNS(lid), "hasIngress", hasIngress)
+	c.log.Debug("service result", "lease-ns", lidNS(lid), "has-hostnames", hasHostnames)
 
 	result := &ctypes.ServiceStatus{
 		Name:               deployment.Name,
@@ -702,32 +702,26 @@ exposeCheckLoop:
 		AvailableReplicas:  deployment.Status.AvailableReplicas,
 	}
 
-	if hasIngress {
-		ingress, err := c.kc.NetworkingV1().Ingresses(lidNS(lid)).Get(ctx, name, metav1.GetOptions{})
+	if hasHostnames {
+		labelSelector := &strings.Builder{}
+		kubeSelectorForLease(labelSelector, lid)
+
+		phs, err := c.ac.AkashV1().ProviderHosts(c.ns).List(ctx,metav1.ListOptions{
+			LabelSelector:        labelSelector.String(),
+		})
 		label := metricsutils.SuccessLabel
 		if err != nil {
 			label = metricsutils.FailLabel
 		}
-		kubeCallsCounter.WithLabelValues("networking-ingresses", label).Inc()
+		kubeCallsCounter.WithLabelValues("provider-hosts", label).Inc()
 		if err != nil {
-			c.log.Error("ingresses get", "err", err)
+			c.log.Error("provider hosts get", "err", err)
 			return nil, errors.Wrap(err, ErrInternalError.Error())
 		}
 
-		hosts := make([]string, 0, len(ingress.Spec.Rules))
-		for _, rule := range ingress.Spec.Rules {
-			hosts = append(hosts, rule.Host)
-		}
-
-		if c.settings.DeploymentIngressExposeLBHosts {
-			for _, lbing := range ingress.Status.LoadBalancer.Ingress {
-				if val := lbing.IP; val != "" {
-					hosts = append(hosts, val)
-				}
-				if val := lbing.Hostname; val != "" {
-					hosts = append(hosts, val)
-				}
-			}
+		hosts := make([]string, 0, len(phs.Items))
+		for _, ph := range phs.Items {
+			hosts = append(hosts, ph.Spec.Hostname)
 		}
 
 		result.URIs = hosts

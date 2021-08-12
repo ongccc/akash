@@ -507,6 +507,7 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 	config.StorageCommitLevel = overcommitPercentStorage
 	config.BlockedHostnames = blockedHostnames
 	config.DeploymentIngressStaticHosts = deploymentIngressStaticHosts
+	config.DeploymentIngressDomain = deploymentIngressDomain
 	config.BidTimeout = bidTimeout
 	config.ManifestTimeout = manifestTimeout
 

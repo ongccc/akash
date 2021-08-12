@@ -65,7 +65,6 @@ type deploymentManager struct {
 }
 
 func newDeploymentManager(s *service, lease mtypes.LeaseID, mgroup *manifest.Group) *deploymentManager {
-
 	log := s.log.With("cmp", "deployment-manager", "lease", lease, "manifest-group", mgroup.Name)
 
 	dm := &deploymentManager{

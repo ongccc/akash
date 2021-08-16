@@ -1156,6 +1156,49 @@ func (c *client) ObserveHostnameState(ctx context.Context) (<- chan cluster.Host
 	return output, nil
 }
 
+func ingressAnnotations(readTimeout, sendTimeout, nextTimeout, maxBodySize, nextTries uint32, nextCases []string) map[string]string {
+	// For kubernetes/ingress-nginx
+	// https://github.com/kubernetes/ingress-nginx
+	const root = "nginx.ingress.kubernetes.io"
+
+	result := map[string]string{
+		fmt.Sprintf("%s/proxy-read-timeout", root):        fmt.Sprintf("%dms", readTimeout),
+		fmt.Sprintf("%s/proxy-send-timeout", root):        fmt.Sprintf("%dms", sendTimeout),
+
+		fmt.Sprintf("%s/proxy-next-upstream-tries", root): strconv.Itoa(int(nextTries)),
+		fmt.Sprintf("%s/proxy-body-size", root):           strconv.Itoa(int(maxBodySize)),
+	}
+
+	nextTimeoutKey := fmt.Sprintf("%s/proxy-next-upstream-timeout", root)
+	if nextTimeout > 0 {
+		result[nextTimeoutKey] = fmt.Sprintf("%dms", nextTimeout)
+	} else {
+		result[nextTimeoutKey] = "0" // Magic value for disable
+	}
+
+	builder := strings.Builder{}
+
+	for i, v := range nextCases {
+		first := string(v[0])
+		isHTTPCode := strings.ContainsAny(first, "12345")
+
+		if isHTTPCode {
+			builder.WriteString("http_")
+		}
+		builder.WriteString(v)
+
+		if i != len(nextCases)-1 {
+			// The actual separator is the space character for kubernetes/ingress-nginx
+			builder.WriteRune(' ')
+		}
+	}
+
+	result[fmt.Sprintf("%s/next-upstream", root)] = builder.String()
+
+	return result
+}
+
+
 func (c *client) ConnectHostnameToDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error {
 	ingressName := hostname
 	ns := lidNS(leaseID)

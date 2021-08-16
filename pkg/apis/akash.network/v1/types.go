@@ -258,6 +258,16 @@ type ManifestServiceExpose struct {
 	Global       bool   `json:"global,omitempty"`
 	// accepted hostnames
 	Hosts []string `json:"hosts,omitempty"`
+	HttpOptions ManifestServiceExposeHttpOptions `json:"http_options,omitempty"`
+}
+
+type ManifestServiceExposeHttpOptions struct {
+	MaxBodySize uint32 `json:"max_body_size,omitempty"`
+	ReadTimeout uint32 `json:"read_timeout,omitempty"`
+	SendTimeout uint32 `json:"send_timeout,omitempty"`
+	NextTries uint32 `json:"next_tries,omitempty"`
+	NextTimeout uint32 `json:"next_timeout,omitempty"`
+	NextCases []string `json:"next_cases,omitempty"`
 }
 
 func (mse ManifestServiceExpose) toAkash() (manifest.ServiceExpose, error) {
@@ -284,6 +294,14 @@ func manifestServiceExposeFromAkash(amse manifest.ServiceExpose) ManifestService
 		Service:      amse.Service,
 		Global:       amse.Global,
 		Hosts:        amse.Hosts,
+		HttpOptions: ManifestServiceExposeHttpOptions{
+			MaxBodySize: amse.HTTPOptions.MaxBodySize,
+			ReadTimeout: amse.HTTPOptions.ReadTimeout,
+			SendTimeout: amse.HTTPOptions.SendTimeout,
+			NextTries:   amse.HTTPOptions.NextTries,
+			NextTimeout: amse.HTTPOptions.NextTimeout,
+			NextCases:   amse.HTTPOptions.NextCases,
+		},
 	}
 }
 

@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"context"
+	crd "github.com/ovrclk/akash/pkg/apis/akash.network/v1"
 	"github.com/ovrclk/akash/provider/cluster"
 	clusterClient "github.com/ovrclk/akash/provider/cluster/kube"
+	"github.com/ovrclk/akash/provider/cluster/util"
+	"github.com/ovrclk/akash/manifest"
 	mtypes "github.com/ovrclk/akash/x/market/types"
 	"github.com/spf13/cobra"
 	"github.com/tendermint/tendermint/libs/log"
@@ -111,6 +114,47 @@ func (op *hostnameOperator) applyDeleteEvent(ctx context.Context, ev cluster.Hos
 }
 
 func (op *hostnameOperator) applyAddOrUpdateEvent(ctx context.Context, ev cluster.HostnameResourceEvent) error {
+	// Locate the matchin service name & expose directive in the manifest CRD
+	found, manifestGroup, err := op.client.GetManifestGroup(ctx, ev.GetLeaseID())
+	if err != nil {
+		return err
+	}
+	if !found {
+		panic("no manifest found") // poll to wait for data since etcd is eventually consistent
+	}
+
+
+	var selectedService crd.ManifestService
+	for _, service := range manifestGroup.Services {
+		if service.Name == ev.GetServiceName() {
+			selectedService = service
+			break
+		}
+	}
+
+	if selectedService.Count == 0 {
+		panic("no service found")
+	}
+
+	var selectedExpose crd.ManifestServiceExpose
+	for _, expose := range selectedService.Expose {
+		if ! expose.Global {
+			continue
+		}
+
+		if ev.GetExternalPort() == uint32(util.ExposeExternalPort(manifest.ServiceExpose{
+			Port:         expose.Port,
+			ExternalPort: expose.ExternalPort,
+		})) {
+			selectedExpose = expose
+			break
+		}
+	}
+
+	if selectedExpose.Port == 0 {
+		panic("no expose found")
+	}
+
 	leaseID := ev.GetLeaseID()
 
 	op.log.Debug("connecting",
@@ -127,21 +171,33 @@ func (op *hostnameOperator) applyAddOrUpdateEvent(ctx context.Context, ev cluste
 		isSameLease = true
 	}
 
-	var err error
+	directive := cluster.ConnectHostnameToDeploymentDirective{
+		Hostname:    ev.GetHostname(),
+		LeaseID:     leaseID,
+		ServiceName: ev.GetServiceName(),
+		ServicePort: int32(ev.GetExternalPort()),
+		ReadTimeout: selectedExpose.HttpOptions.ReadTimeout,
+		SendTimeout: selectedExpose.HttpOptions.SendTimeout,
+		NextTimeout: selectedExpose.HttpOptions.NextTimeout,
+		MaxBodySize: selectedExpose.HttpOptions.MaxBodySize,
+		NextTries:   selectedExpose.HttpOptions.NextTries,
+		NextCases:   selectedExpose.HttpOptions.NextCases,
+	}
+
 	if isSameLease {
 		// Check to see if port or service name is different
 		changed := !exists || uint32(entry.presentExternalPort) != ev.GetExternalPort() || entry.presentServiceName != ev.GetServiceName()
 		if changed {
 			op.log.Debug("Updating ingress")
 			// Update or create the existing ingress
-			err = op.client.ConnectHostnameToDeployment(ctx, ev.GetHostname(), leaseID, ev.GetServiceName(), int32(ev.GetExternalPort()))
+			err = op.client.ConnectHostnameToDeployment(ctx, directive)
 		}
 	} else {
 		op.log.Debug("Swapping ingress to new deployment")
 		//  Delete the ingress in one namespace and recreate it in the correct one
 		err = op.client.RemoveHostnameFromDeployment(ctx, ev.GetHostname(), entry.presentLease, false)
 		if err == nil {
-			err = op.client.ConnectHostnameToDeployment(ctx, ev.GetHostname(), leaseID, ev.GetServiceName(), int32(ev.GetExternalPort()))
+			err = op.client.ConnectHostnameToDeployment(ctx, directive)
 		}
 	}
 

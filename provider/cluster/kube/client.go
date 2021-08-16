@@ -1156,29 +1156,29 @@ func (c *client) ObserveHostnameState(ctx context.Context) (<- chan cluster.Host
 	return output, nil
 }
 
-func ingressAnnotations(readTimeout, sendTimeout, nextTimeout, maxBodySize, nextTries uint32, nextCases []string) map[string]string {
+func kubeNginxIngressAnnotations(directive cluster.ConnectHostnameToDeploymentDirective ) map[string]string {
 	// For kubernetes/ingress-nginx
 	// https://github.com/kubernetes/ingress-nginx
 	const root = "nginx.ingress.kubernetes.io"
 
 	result := map[string]string{
-		fmt.Sprintf("%s/proxy-read-timeout", root):        fmt.Sprintf("%dms", readTimeout),
-		fmt.Sprintf("%s/proxy-send-timeout", root):        fmt.Sprintf("%dms", sendTimeout),
+		fmt.Sprintf("%s/proxy-read-timeout", root):        fmt.Sprintf("%dms", directive.ReadTimeout),
+		fmt.Sprintf("%s/proxy-send-timeout", root):        fmt.Sprintf("%dms", directive.SendTimeout),
 
-		fmt.Sprintf("%s/proxy-next-upstream-tries", root): strconv.Itoa(int(nextTries)),
-		fmt.Sprintf("%s/proxy-body-size", root):           strconv.Itoa(int(maxBodySize)),
+		fmt.Sprintf("%s/proxy-next-upstream-tries", root): strconv.Itoa(int(directive.NextTries)),
+		fmt.Sprintf("%s/proxy-body-size", root):           strconv.Itoa(int(directive.MaxBodySize)),
 	}
 
 	nextTimeoutKey := fmt.Sprintf("%s/proxy-next-upstream-timeout", root)
-	if nextTimeout > 0 {
-		result[nextTimeoutKey] = fmt.Sprintf("%dms", nextTimeout)
+	if directive.NextTimeout > 0 {
+		result[nextTimeoutKey] = fmt.Sprintf("%dms", directive.NextTimeout)
 	} else {
 		result[nextTimeoutKey] = "0" // Magic value for disable
 	}
 
 	builder := strings.Builder{}
 
-	for i, v := range nextCases {
+	for i, v := range directive.NextCases {
 		first := string(v[0])
 		isHTTPCode := strings.ContainsAny(first, "12345")
 
@@ -1187,7 +1187,7 @@ func ingressAnnotations(readTimeout, sendTimeout, nextTimeout, maxBodySize, next
 		}
 		builder.WriteString(v)
 
-		if i != len(nextCases)-1 {
+		if i != len(directive.NextCases)-1 {
 			// The actual separator is the space character for kubernetes/ingress-nginx
 			builder.WriteRune(' ')
 		}
@@ -1199,21 +1199,22 @@ func ingressAnnotations(readTimeout, sendTimeout, nextTimeout, maxBodySize, next
 }
 
 
-func (c *client) ConnectHostnameToDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error {
-	ingressName := hostname
-	ns := lidNS(leaseID)
-	rules := ingressRules(hostname, serviceName, servicePort)
+func (c *client) ConnectHostnameToDeployment(ctx context.Context, directive cluster.ConnectHostnameToDeploymentDirective) error {
+	ingressName := directive.Hostname
+	ns := lidNS(directive.LeaseID)
+	rules := ingressRules(directive.Hostname, directive.ServiceName, directive.ServicePort)
 
 	_, err := c.kc.NetworkingV1().Ingresses(ns).Get(ctx, ingressName, metav1.GetOptions{})
 	metricsutils.IncCounterVecWithLabelValuesFiltered(kubeCallsCounter, "ingresses-get", err, kubeErrors.IsNotFound)
 
 	labels := make(map[string]string)
-	appendLeaseLabels(leaseID, labels)
+	appendLeaseLabels(directive.LeaseID, labels)
 
 	obj := &netv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   ingressName,
 			Labels: labels,
+			Annotations: kubeNginxIngressAnnotations(directive),
 		},
 		Spec: netv1.IngressSpec{
 			Rules: rules,

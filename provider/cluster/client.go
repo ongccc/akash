@@ -85,7 +85,7 @@ type Client interface {
 		tsq remotecommand.TerminalSizeQueue) (ctypes.ExecResult, error)
 
 	// Connect a given hostname to a deployment
-	ConnectHostnameToDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error
+	ConnectHostnameToDeployment(ctx context.Context, directive ConnectHostnameToDeploymentDirective) error
 	// Remove a given hostname from a deployment
 	RemoveHostnameFromDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, allowMissing bool) error
 
@@ -94,6 +94,21 @@ type Client interface {
 	// Purge any hostnames associated with a given deployment
 	PurgeDeclaredHostnames(ctx context.Context, lID mtypes.LeaseID) error
 }
+
+
+type ConnectHostnameToDeploymentDirective struct {
+	Hostname string
+	LeaseID mtypes.LeaseID
+	ServiceName string
+	ServicePort int32
+	ReadTimeout uint32
+	SendTimeout uint32
+	NextTimeout uint32
+	MaxBodySize uint32
+	NextTries uint32
+	NextCases []string //
+}
+
 
 type LeaseIdHostnameConnection interface {
 	GetLeaseID() mtypes.LeaseID
@@ -190,7 +205,7 @@ func (c *nullClient) GetHostnameDeploymentConnections(ctx context.Context) ([]Le
 }
 
 // Connect a given hostname to a deployment
-func (c *nullClient) ConnectHostnameToDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, serviceName string, servicePort int32) error {
+func (c *nullClient) ConnectHostnameToDeployment(ctx context.Context, directive ConnectHostnameToDeploymentDirective) error {
 	return errNotImplemented
 }
 

@@ -2,8 +2,10 @@ package app
 
 import (
 	"io"
+	"math"
 	"net/http"
 	"os"
+	"time"
 
 	bam "github.com/cosmos/cosmos-sdk/baseapp"
 	"github.com/cosmos/cosmos-sdk/client"
@@ -102,6 +104,8 @@ import (
 
 const (
 	AppName = "akash"
+
+	tHalf = 2 // years
 )
 
 var (
@@ -110,7 +114,18 @@ var (
 
 	// module accounts that are allowed to receive tokens
 	allowedReceivingModAcc = map[string]bool{}
+
+	genesisTime time.Time
 )
+
+func init() {
+	var err error
+	genesisTimeStr := "2020-09-25T14:00:00Z"
+	genesisTime, err = time.Parse(time.RFC3339, genesisTimeStr)
+	if err != nil {
+		panic(err)
+	}
+}
 
 // AkashApp extends ABCI appplication
 type AkashApp struct {
@@ -347,7 +362,7 @@ func NewApp(
 			capability.NewAppModule(appCodec, *app.keeper.cap),
 			crisis.NewAppModule(&app.keeper.crisis, skipGenesisInvariants),
 			gov.NewAppModule(appCodec, app.keeper.gov, app.keeper.acct, app.keeper.bank),
-			mint.NewAppModule(appCodec, app.keeper.mint, app.keeper.acct),
+			mint.NewAppModule(appCodec, app.keeper.mint, app.keeper.acct, inflationCalculator),
 			slashing.NewAppModule(appCodec, app.keeper.slashing, app.keeper.acct, app.keeper.bank, app.keeper.staking),
 			distr.NewAppModule(appCodec, app.keeper.distr, app.keeper.acct, app.keeper.bank, app.keeper.staking),
 			staking.NewAppModule(appCodec, app.keeper.staking, app.keeper.acct, app.keeper.bank),
@@ -414,7 +429,7 @@ func NewApp(
 			bank.NewAppModule(appCodec, app.keeper.bank, app.keeper.acct),
 			capability.NewAppModule(appCodec, *app.keeper.cap),
 			gov.NewAppModule(appCodec, app.keeper.gov, app.keeper.acct, app.keeper.bank),
-			mint.NewAppModule(appCodec, app.keeper.mint, app.keeper.acct),
+			mint.NewAppModule(appCodec, app.keeper.mint, app.keeper.acct, inflationCalculator),
 			staking.NewAppModule(appCodec, app.keeper.staking, app.keeper.acct, app.keeper.bank),
 			distr.NewAppModule(appCodec, app.keeper.distr, app.keeper.acct, app.keeper.bank, app.keeper.staking),
 			slashing.NewAppModule(appCodec, app.keeper.slashing, app.keeper.acct, app.keeper.bank, app.keeper.staking),
@@ -461,6 +476,30 @@ func NewApp(
 	app.keeper.scopedTransfer = scopedTransferKeeper
 
 	return app
+}
+
+func inflationCalculator(ctx sdk.Context, minter minttypes.Minter, params minttypes.Params, bondedRatio sdk.Dec) sdk.Dec {
+	i0 := 100.0
+	t := ctx.BlockTime().Sub(genesisTime).Seconds() / (60 * 60 * 8766) // years passed
+	i := i0 * math.Pow(2, -t/tHalf)
+	inflation := sdk.NewDec(int64(i))
+
+	// min, max inflation based on a defined range parameter 'r'
+	// inflation range = [I(t) - I(t) * R, I(t) + I(t) * R]
+	r, err := sdk.NewDecFromStr("0.05") // let's say we allow 5% variance
+	if err != nil {
+		panic(err)
+	}
+	minInflation := minter.Inflation.Sub(minter.Inflation.Mul(r))
+	maxInflation := minter.Inflation.Add(minter.Inflation.Mul(r))
+
+	if inflation.LT(minInflation) {
+		inflation = minInflation
+	} else if inflation.GT(maxInflation) {
+		inflation = maxInflation
+	}
+
+	return inflation
 }
 
 func (app *AkashApp) registerUpgradeHandlers() {

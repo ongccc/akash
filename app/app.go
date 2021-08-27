@@ -482,10 +482,19 @@ func inflationCalculator(ctx sdk.Context, minter minttypes.Minter, params mintty
 	i0 := 100.0
 	t := ctx.BlockTime().Sub(genesisTime).Seconds() / (60 * 60 * 8766) // years passed
 	i := i0 * math.Pow(2, -t/tHalf)
-	inflation := sdk.NewDec(int64(i))
+	idealInflation := sdk.NewDec(int64(i))
 
-	// min, max inflation based on a defined range parameter 'r'
-	// inflation range = [I(t) - I(t) * R, I(t) + I(t) * R]
+	// (1 - bondedRatio/GoalBonded) * InflationRateChange
+	inflationRateChangePerYear := sdk.OneDec().
+		Sub(bondedRatio.Quo(params.GoalBonded)).
+		Mul(params.InflationRateChange)
+	inflationRateChange := inflationRateChangePerYear.Quo(sdk.NewDec(int64(params.BlocksPerYear)))
+
+	// note inflationRateChange may be negative
+	currentInflation := idealInflation.Add(inflationRateChange)
+
+	// min, max currentInflation based on a defined range parameter 'r'
+	// currentInflation range = [I(t) - I(t) * R, I(t) + I(t) * R]
 	r, err := sdk.NewDecFromStr("0.05") // let's say we allow 5% variance
 	if err != nil {
 		panic(err)
@@ -493,13 +502,13 @@ func inflationCalculator(ctx sdk.Context, minter minttypes.Minter, params mintty
 	minInflation := minter.Inflation.Sub(minter.Inflation.Mul(r))
 	maxInflation := minter.Inflation.Add(minter.Inflation.Mul(r))
 
-	if inflation.LT(minInflation) {
-		inflation = minInflation
-	} else if inflation.GT(maxInflation) {
-		inflation = maxInflation
+	if currentInflation.LT(minInflation) {
+		currentInflation = minInflation
+	} else if currentInflation.GT(maxInflation) {
+		currentInflation = maxInflation
 	}
 
-	return inflation
+	return currentInflation
 }
 
 func (app *AkashApp) registerUpgradeHandlers() {

@@ -491,7 +491,7 @@ func inflationCalculator(ctx sdk.Context, minter minttypes.Minter, params mintty
 	inflationRateChange := inflationRateChangePerYear.Quo(sdk.NewDec(int64(params.BlocksPerYear)))
 
 	// note inflationRateChange may be negative
-	currentInflation := idealInflation.Add(inflationRateChange)
+	currentInflation := minter.Inflation.Add(inflationRateChange)
 
 	// min, max currentInflation based on a defined range parameter 'r'
 	// currentInflation range = [I(t) - I(t) * R, I(t) + I(t) * R]
@@ -499,8 +499,14 @@ func inflationCalculator(ctx sdk.Context, minter minttypes.Minter, params mintty
 	if err != nil {
 		panic(err)
 	}
-	minInflation := minter.Inflation.Sub(minter.Inflation.Mul(r))
-	maxInflation := minter.Inflation.Add(minter.Inflation.Mul(r))
+	minInflation := idealInflation.Sub(idealInflation.Mul(r))
+	maxInflation := idealInflation.Add(idealInflation.Mul(r))
+
+	// minInflation >= minimumMinInflation
+	minimumMinInflation := sdk.ZeroDec() // 0 for now
+	if minInflation.LT(minimumMinInflation) {
+		minInflation = minimumMinInflation
+	}
 
 	if currentInflation.LT(minInflation) {
 		currentInflation = minInflation

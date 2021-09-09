@@ -52,7 +52,7 @@ require (
 )
 
 replace (
-	github.com/cosmos/cosmos-sdk => github.com/ovrclk/cosmos-sdk v0.42.0-alpha1.0.20210823102438-6c31a0a2f6f6
+	github.com/cosmos/cosmos-sdk => github.com/ovrclk/cosmos-sdk v0.42.0-alpha1.0.20210909100325-11e54c8fc931
 	github.com/gogo/protobuf => github.com/regen-network/protobuf v1.3.3-alpha.regen.1
 	github.com/keybase/go-keychain => github.com/99designs/go-keychain v0.0.0-20191008050251-8e49817e8af4
 	github.com/tendermint/tendermint => github.com/ovrclk/tendermint v0.34.11-patches
